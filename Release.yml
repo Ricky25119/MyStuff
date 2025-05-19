@@ -1,0 +1,207 @@
+trigger:
+    - develop 
+
+parameters:
+  - name: Environment
+    type: string
+    default: 'DEV'
+
+  - name: ChangeType
+    displayName: 'Type of Change'
+    type: string
+    default: 'minor'
+    values:
+      - minor
+      - major'
+
+variables:
+  buildConfiguration: 'Release'
+  artifactName: 'webapp'
+  solution: '**/*.sln'
+
+stages:
+- stage: Build
+  displayName: 'Build & Publish Artifact'
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: NuGetToolInstaller@1
+    - task: NuGetCommand@2
+      inputs:
+        restoreSolution: '$(solution)'
+    - task: VSBuild@1
+      inputs:
+        solution: '$(solution)'
+        msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(Build.ArtifactStagingDirectory)"'
+        platform: 'Any CPU'
+        configuration: '$(buildConfiguration)'    
+    - task: Bash@3
+      displayName: 'Get short SHA'
+      inputs:
+        targetType: 'inline'
+        script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
+          echo "SHORT_SHA: $SHORT_SHA"
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: '$(artifactName)'
+        publishLocation: 'Container'
+  # Tag build with short SHA
+    - task: Bash@3
+      displayName: 'Tag build with short SHA'
+      inputs:
+        targetType: 'inline'
+        script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "Triggering build for short SHA: $SHORT_SHA"
+          echo "##vso[build.addbuildtag]shortsha-$SHORT_SHA"
+
+# Stage 3: Deploy to Staging and Production
+- stage: DeployStagingProduction
+  displayName: 'Deploy to Staging and Production'
+  dependsOn: Build
+  condition: and(succeeded(), eq('${{ parameters.Environment }}', 'DEV'))
+  variables:
+    artifactName: 'webapp'  # Ensure this matches your Build artifact name
+  jobs:
+    - deployment: DeployStaging
+      displayName: 'Deploy to Staging Slot'
+      environment: 'Staging'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - task: DownloadBuildArtifacts@1
+                inputs:
+                  buildType: 'current'
+                  downloadType: 'single'
+                  artifactName: '$(artifactName)'
+                  tags: 'shortsha-$(shortSha)'
+                  downloadPath: '$(System.ArtifactsDirectory)'
+                displayName: 'Download Artifacts'
+
+              - task: PowerShell@2
+                displayName: 'Consumed Artifact '
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    Write-Host "Downloaded artifact from build triggered by the current merge."
+                    Write-Host "Contents of $(System.ArtifactsDirectory):"
+                    Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
+
+              - task: AzureRmWebAppDeployment@5
+                inputs:
+                  ConnectionType: 'AzureRM'
+                  azureSubscription: 'Dotnet'
+                  appType: 'webApp'
+                  WebAppName: 'Mark24'
+                  packageForLinux: '$(System.ArtifactsDirectory)/$(artifactName)/**/*.zip'
+                displayName: 'Deploy to Staging Slot'
+
+          
+
+    - job: CreateReleaseBranch
+      displayName: 'Create Release Branch and Merge to Main'
+      dependsOn: DeployStaging
+      steps:
+        - checkout: self
+          persistCredentials: true
+
+        - task: Bash@3
+          name: versioning
+          displayName: 'Determine next version and create branch'
+          inputs:
+            targetType: 'inline'
+            script: |
+              git fetch --all
+
+              echo "Finding latest Release branch..."
+              latest=$(git branch -r | grep 'origin/Release/' | sed 's|origin/Release/||' | sort -V | tail -1)
+
+              if [ -z "$latest" ]; then
+                version="1.0"
+              else
+                major=$(echo $latest | cut -d. -f1)
+                minor=$(echo $latest | cut -d. -f2)
+
+                if [ '${{ parameters.ChangeType }}' == 'major' ]; then
+                  major=$((major + 1))
+                  minor=0
+                else
+                  minor=$((minor + 1))
+                fi
+
+                version="${major}.${minor}"
+              fi
+
+              echo "Creating release/$version"
+              git checkout -b Release/$version
+              git push origin Release/$version
+              
+
+              echo "##vso[task.setvariable variable=releaseBranch;isOutput=true]Release/$version"
+              echo "##vso[task.setvariable variable=releaseTag;isOutput=true]v$version"
+              
+- stage: MergeReleaseToMain
+  displayName: 'Merge Release to Main & Tag'
+  dependsOn: DeployStagingProduction  # Ensures it runs after staging
+  condition: succeeded()              # Optional condition
+  # variables:
+  #   releaseBranch: $[ dependencies.DeployStagingProduction.outputs['CreateReleaseBranch.versioning.releaseBranch'] ]
+  #   releaseTag: $[ dependencies.DeployStagingProduction.outputs['CreateReleaseBranch.versioning.releaseTag'] ]
+  jobs:
+    - deployment: MergeToMain
+      displayName: 'Merge to Main and Create Tag'
+      environment: 'Production'   # <-- Add approval in Azure DevOps UI
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+                persistCredentials: true
+              - task: Bash@3
+                displayName: 'Auto-Merge Latest Release to Main and Tag'
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    echo "Fetching all remote branches..."
+                    git fetch --all
+
+                    echo "Finding the latest release branch..."
+                    latest=$(git branch -r | grep 'origin/Release/' | sed 's|origin/Release/||' | sort -V | tail -1)
+
+                    if [ -z "$latest" ]; then
+                      echo "No release branches found. Exiting."
+                      exit 1
+                    fi
+
+                    echo "Latest release branch: $latest"
+
+                    echo "Checking out main branch..."
+                    git checkout main
+                    git pull origin main
+
+                    echo "Merging origin/Release/$latest into main..."
+                    git merge origin/Release/$latest --no-ff -m "Merge Release/$latest into main"
+                    git push origin main
+
+                    tag="v$latest"
+                    echo "Tagging commit with $tag"
+                    git tag $tag
+                    git push origin $tag
+
+                    echo "Successfully merged and tagged $tag"
+
+              
+
+              - task: PublishBuildArtifacts@1
+                inputs:
+                  PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+                  ArtifactName: '$(artifactName)-$(releaseTag)'
+
+
+
