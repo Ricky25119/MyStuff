@@ -104,47 +104,98 @@ stages:
 
           
 
+    # - job: CreateReleaseBranch
+    #   displayName: 'Create Release Branch and Merge to Main'
+    #   dependsOn: DeployStaging
+    #   steps:
+    #     - checkout: self
+    #       persistCredentials: true
+
+    #     - task: Bash@3
+    #       name: versioning
+    #       displayName: 'Determine next version and create branch'
+    #       inputs:
+    #         targetType: 'inline'
+    #         script: |
+    #           git fetch --all
+
+    #           echo "Finding latest Release branch..."
+    #           latest=$(git branch -r | grep 'origin/Release/' | sed 's|origin/Release/||' | sort -V | tail -1)
+
+    #           if [ -z "$latest" ]; then
+    #             version="1.0"
+    #           else
+    #             major=$(echo $latest | cut -d. -f1)
+    #             minor=$(echo $latest | cut -d. -f2)
+
+    #             if [ '${{ parameters.ChangeType }}' == 'major' ]; then
+    #               major=$((major + 1))
+    #               minor=0
+    #             else
+    #               minor=$((minor + 1))
+    #             fi
+
+    #             version="${major}.${minor}"
+    #           fi
+
+    #           echo "Creating release/$version"
+    #           git checkout -b Release/$version
+    #           git push origin Release/$version
+              
+
+    #           echo "##vso[task.setvariable variable=releaseBranch;isOutput=true]Release/$version"
+    #           echo "##vso[task.setvariable variable=releaseTag;isOutput=true]v$version"
     - job: CreateReleaseBranch
       displayName: 'Create Release Branch and Merge to Main'
       dependsOn: DeployStaging
       steps:
         - checkout: self
           persistCredentials: true
+        - task: PowerShell@2
+              name: versioning
+              displayName: 'Determine next version and create branch (PowerShell)'
+              inputs:
+                targetType: 'inline'
+                script: |
+                  git fetch --all
+    
+                  Write-Host "Getting all release branches..."
+                  $branches = git branch -r | Where-Object { $_ -match 'origin/Release/\d+\.\d+-rc$' } | ForEach-Object {
+                      ($_ -replace 'origin/Release/', '') -replace '-rc', ''
+                  }
+    
+                  if (-not $branches) {
+                      $major = 1
+                      $minor = 0
+                  } else {
+                      $latest = $branches | Sort-Object { [version]$_ } | Select-Object -Last 1
+                      Write-Host "Latest version found: $latest"
+    
+                      $parts = $latest -split '\.'
+                      $major = [int]$parts[0]
+                      $minor = [int]$parts[1]
+    
+                      if ($env:CHANGE_TYPE -eq "major") {
+                          $major++
+                          $minor = 0
+                      } else {
+                          $minor++
+                      }
+                  }
+    
+                  $version = "$major.$minor-rc"
+                  $tag = "v$version"
+                  $branchName = "Release/$version"
+    
+                  Write-Host "Creating branch: $branchName"
+                  git checkout -b $branchName
+                  git push origin $branchName
+    
+                  Write-Host "##vso[task.setvariable variable=releaseBranch;isOutput=true]$branchName"
+                  Write-Host "##vso[task.setvariable variable=releaseTag;isOutput=true]$tag"
+              env:
+                 CHANGE_TYPE: ${{ parameters.ChangeType }}
 
-        - task: Bash@3
-          name: versioning
-          displayName: 'Determine next version and create branch'
-          inputs:
-            targetType: 'inline'
-            script: |
-              git fetch --all
-
-              echo "Finding latest Release branch..."
-              latest=$(git branch -r | grep 'origin/Release/' | sed 's|origin/Release/||' | sort -V | tail -1)
-
-              if [ -z "$latest" ]; then
-                version="1.0"
-              else
-                major=$(echo $latest | cut -d. -f1)
-                minor=$(echo $latest | cut -d. -f2)
-
-                if [ '${{ parameters.ChangeType }}' == 'major' ]; then
-                  major=$((major + 1))
-                  minor=0
-                else
-                  minor=$((minor + 1))
-                fi
-
-                version="${major}.${minor}"
-              fi
-
-              echo "Creating release/$version"
-              git checkout -b Release/$version
-              git push origin Release/$version
-              
-
-              echo "##vso[task.setvariable variable=releaseBranch;isOutput=true]Release/$version"
-              echo "##vso[task.setvariable variable=releaseTag;isOutput=true]v$version"
               
 - stage: MergeReleaseToMain
   displayName: 'Merge Release to Main & Tag'
