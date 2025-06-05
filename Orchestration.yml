@@ -1,0 +1,165 @@
+# Central pipeline to orchestrate API/UI deployments and create release branch on success
+trigger:
+  branches:
+    include:
+      - develop
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: Orchestration # Variable group from Azure DevOps Library
+  - name: apiPipelinePath
+    value: 'API/API-Deployment.yml'
+  - name: uiPipelinePath
+    value: 'UI/UI-Deployment.yml'
+  - name: serviceconnection
+    value: 'Dotnet'
+  - name: APIWebapp
+    value: 'Apitestres'
+  - name: UIWebapp
+    value: 'testres'
+
+stages:
+
+# === Stage 1: API Build & Deploy (via template) ===
+
+
+
+- stage: Versioning
+  displayName: 'Determine Release Version'  
+  jobs:
+    - job: CalculateVersion
+      displayName: 'Calculate next version'
+      steps:
+        - checkout: self
+          persistCredentials: true
+          fetchDepth: 0
+
+        - task: PowerShell@2
+          name: CalculateReleaseBranch
+          displayName: 'Calculate next version'
+          inputs:
+            targetType: 'inline'
+            script: |
+              $ErrorActionPreference = "Stop"
+
+              # Auth setup using variable group PAT
+              $pat = $env:PAT
+              $organization = $env:Organisation
+              $project = $env:Project
+              $repositoryId = $env:repositoryId
+              $headers = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat")) }
+
+              # Step 1: Get the latest completed PR
+              $Baseuri = "https://dev.azure.com/$organization/"
+              $uri = "$Baseuri/_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&api-version=6.1-preview&`$top=100"
+              $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+
+              if ($response.count -eq 0) {
+                Write-Host "No completed PRs found. Defaulting to 'minor'."
+                $changeType = "minor"
+              } else {
+                $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
+                $title = $latestPR.title
+                $ClosedDate = $latestPR.closedDate
+                $CreatedBy = $latestPR.createdBy.displayName
+                $description = $latestPR.description
+                Write-Host "Latest PR Title: $title"
+                Write-Host "PR Closed Date: $ClosedDate"
+                Write-Host "PR Created By: $CreatedBy"
+                Write-Host "PR Description: $description"
+                if ($description -match "(?i)buildConfiguration\s*=\s*'([^']+)'") {
+                    $buildConfiguration = $matches[1]
+                    Write-Host "Extracted buildConfiguration: $buildConfiguration"
+                } else {
+                    Write-Host "No buildConfiguration found in PR description. Defaulting to 'Release'"
+                    $buildConfiguration = "Release"
+                }
+
+                # Set pipeline variable
+                Write-Host "##vso[task.setvariable variable=buildConfiguration;isOutput=true]$buildConfiguration"
+
+
+                if ($title -match '(?i)\bmajor\b') {
+                  $changeType = "major"
+                } else {
+                  $changeType = "minor"
+                }
+              }
+
+              Write-Host "Determined CHANGE_TYPE: $changeType"
+              Write-Host "##vso[task.setvariable variable=CHANGE_TYPE;isOutput=true]$changeType"
+
+          env:
+            PAT: $(PAT)
+            Organisation: $(Organisation)
+            Project: $(Project)
+            repositoryId: $(repositoryId)
+- template: API/API-Deployment.yml
+  parameters:
+    azureSubscription:  $(serviceconnection)
+    webAppName: $(APIWebapp)
+    project: '**/ASP.NET_Core_API.csproj'
+    buildConfiguration: $[stageDependencies.Versioning.CalculateVersion.outputs['CalculateReleaseBranch.buildConfiguration']]
+    artifactName: 'drop'
+    solution: '**/ASP.NET_Core_API.sln'
+
+- stage: ReleaseVersioning
+  displayName: 'Create Release Branch'
+  dependsOn: DeployStagingProduction  
+  condition: succeeded()
+  variables:
+    CHANGE_TYPE: $[stageDependencies.Versioning.CalculateVersion.outputs['CalculateReleaseBranch.CHANGE_TYPE']]
+  jobs:
+    - job: CreateReleaseBranch
+      displayName: 'Create release branch'
+      steps:
+        - checkout: self
+          persistCredentials: true
+          fetchDepth: 0
+
+        - task: PowerShell@2
+          name: CreateReleaseBranch
+          displayName: 'Create release branch'
+          inputs:
+            targetType: 'inline'
+            script: |
+              # Step 2: Fetch all release branches and find the latest
+              Write-Host "Determined CHANGE_TYPE: $CHANGE_TYPE"
+              git fetch --all
+              $branches = git branch -r | Where-Object { $_ -match 'origin/Release/\d+\.\d+-rc$' } | ForEach-Object {
+                  ($_ -replace 'origin/Release/', '') -replace '-rc', ''
+              }
+
+              if (-not $branches) {
+                  $major = 1
+                  $minor = 0
+              } else {
+                  $latest = $branches | Sort-Object { [version]$_ } | Select-Object -Last 1
+                  Write-Host "Latest version found: $latest"
+
+                  $parts = $latest -split '\.'
+                  $major = [int]$parts[0]
+                  $minor = [int]$parts[1]
+
+                  if ($CHANGE_TYPE -eq "major") {
+                      $major++
+                      $minor = 0
+                  } else {
+                      $minor++
+                  }
+              }
+
+              $version = "$major.$minor-rc"
+              $tag = "v$version"
+              $branchName = "Release/$version"
+
+              # Step 3: Create and push branch
+              Write-Host "Creating branch: $branchName"
+              git checkout -b $branchName
+              git push origin $branchName
+
+              # Step 4: Set variables
+              Write-Host "##vso[task.setvariable variable=releaseBranch;isOutput=true;isOutput=true]$branchName"
+              Write-Host "##vso[task.setvariable variable=releaseTag;isOutput=true;isOutput=true]$tag"
