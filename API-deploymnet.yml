@@ -1,0 +1,107 @@
+# ASP.NET Core API Build and Deploy Pipeline
+# Builds and deploys an ASP.NET Core API to Azure App Service
+
+
+parameters:
+  - name: azureSubscription
+    type: string
+    default: ''
+  - name: webAppName
+    type: string
+    default: ''
+  - name: project
+    type: string
+    default: ''
+  - name: buildConfiguration
+    type: string
+    default: ''
+  - name: artifactName
+    type: string
+    default: ''
+  - name: solution
+    type: string
+    default: ''
+
+
+stages:
+- stage: Build
+  displayName: 'Build & Publish Artifact'
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: NuGetToolInstaller@1
+    - task: NuGetCommand@2
+      inputs:
+        restoreSolution: '${{ parameters.solution }}'
+    - task: VSBuild@1
+      inputs:
+        solution: '${{ parameters.solution }}'
+        msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(Build.ArtifactStagingDirectory)"'
+        platform: 'Any CPU'
+        configuration: '${{ parameters.buildConfiguration }}'    
+    - task: Bash@3
+      displayName: 'Get short SHA'
+      inputs:
+        targetType: 'inline'
+        script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
+          echo "SHORT_SHA: $SHORT_SHA"
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: '${{ parameters.artifactName }}'
+        publishLocation: 'Container'
+  # Tag build with short SHA
+    - task: Bash@3
+      displayName: 'Tag build with short SHA'
+      inputs:
+        targetType: 'inline'
+        script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "Triggering build for short SHA: $SHORT_SHA"
+          echo "##vso[build.addbuildtag]shortsha-$SHORT_SHA"
+
+# Stage 3: Deploy to Staging and Production
+- stage: DeployStagingProduction
+  displayName: 'Deploy to Staging and Production'
+  dependsOn: Build
+  condition: succeeded()
+  variables:
+    artifactName: 'webapp'  # Ensure this matches your Build artifact name
+  jobs:
+    - deployment: DeployStaging
+      displayName: 'Deploy to Staging Slot'
+      environment: 'Staging'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - task: DownloadBuildArtifacts@1
+                inputs:
+                  buildType: 'current'
+                  downloadType: 'single'
+                  artifactName: '${{ parameters.artifactName }}'
+                  tags: 'shortsha-$(shortSha)'
+                  downloadPath: '$(System.ArtifactsDirectory)'
+                displayName: 'Download Artifacts'
+
+              - task: PowerShell@2
+                displayName: 'Consumed Artifact '
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    Write-Host "Downloaded artifact from build triggered by the current merge."
+                    Write-Host "Contents of $(System.ArtifactsDirectory):"
+                    Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
+
+              - task: AzureRmWebAppDeployment@5
+                inputs:
+                  ConnectionType: 'AzureRM'
+                  azureSubscription: '${{ parameters.azureSubscription }}'
+                  appType: 'webApp'
+                  WebAppName: '${{ parameters.webAppName }}'
+                  packageForLinux: '$(System.ArtifactsDirectory)/drop/**/*.zip'
+                displayName: 'Deploy to Staging Slot'
