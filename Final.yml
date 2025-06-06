@@ -1,0 +1,334 @@
+trigger:
+  branches:
+    include:
+      - dev
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: Workbench 
+
+stages:
+
+- stage: CustomerConfig
+  displayName: 'Customer Configuration'  
+  jobs:
+    - job: DetermineConfig
+      displayName: 'Calculate next version'
+      steps:
+        - checkout: self
+          persistCredentials: true
+          fetchDepth: 0
+
+        - task: PowerShell@2
+          name: GetConfigFile
+          displayName: 'Calculate next version'
+          inputs:
+            targetType: 'inline'
+            script: |
+              Write-Host "Starting script..."
+              Write-Host "Organisation: $env:Organisation"
+              
+
+              $pat = $env:PAT
+              $organization = $env:Organisation
+              $repositoryId = $env:repositoryId
+              $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+              $headers = @{ Authorization = "Basic $token"  }
+
+              $Baseuri = "https://dev.azure.com/$organization/"
+              $targetBranch = "refs/heads/develop"
+              $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
+              $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+
+              if ($response.count -eq 0) {
+                Write-Host "No completed PRs found. Defaulting to 'minor'."
+                $changeType = "minor"
+                $buildConfiguration = "debug"
+              } else {
+                $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
+                $title = $latestPR.title
+                $description = $latestPR.description
+                $PrRaisedTo = $latestPR.targetRefName
+
+                if ($description -match "(?i)buildConfiguration\s*=\s*'([^']+)'") {
+                    $buildConfiguration = $matches[1]
+                } else {
+                    $buildConfiguration = "debug"
+                }
+              }
+              
+              Write-Host "Change Type : $changeType , Config: $buildConfiguration,PR title: $title, PR Description: $description,PR raised to: $PrRaisedTo  "
+              Write-Host "##vso[task.setvariable variable=buildConfiguration;isOutput=true]$buildConfiguration"
+
+          env:
+            PAT: $(PAT)
+            Organisation: $(Organisation)
+            repositoryId: $(repositoryId)
+         
+
+# Build stage for compiling and packaging the application.
+- stage: BuildUI
+  displayName: 'Build UI'
+  variables:
+    buildConfiguration: $[stageDependencies.CustomerConfig.DetermineConfig.outputs['GetConfigFile.buildConfiguration']]
+  jobs:
+  - job: Build
+    steps:
+      - checkout: self
+# Installs NuGet tool version 6.13.2 for package restoration.
+      - task: NuGetToolInstaller@1
+        inputs:
+          versionSpec: '6.13.2'
+          checkLatest: true
+# Restores NuGet packages for the solutions.
+      - task: NuGetCommand@2
+        displayName: 'Restore NuGet packages'
+        inputs:
+          command: 'restore'
+          restoreSolution: '**/SCJM.sln'
+          feedsToUse: 'select'
+# Builds the solution using MSBuild, creating a web deployment package.      
+      - task: VSBuild@1
+        inputs:
+          solution: '**/SCJM.sln'
+# Configures deployment, packaging, and output location.
+          msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
+          clean:  true
+          platform: 'Any CPU'
+          configuration: '$(buildConfiguration)'
+      - task: Bash@3
+        displayName: 'Get-shortsha'
+        inputs:
+         targetType: 'inline'
+         script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
+          echo "$SHORT_SHA:$SHORT_SHA:$SHORT_SHORT"
+# Copies all files from artifact staging directory.
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: '$(build.artifactStagingDirectory)'
+          Contents: '**'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)'
+# Publishes build artifacts as 'drop' for use in later stages.
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'UI'
+          publishLocation: 'Container'
+      - task: Bash@3
+        displayName: 'Tag build with short SHA'
+        inputs:
+         targetType: 'inline'
+         script: |
+           SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+           echo "Triggering build for short SHA: $SHORT_SHA"
+           echo "##vso[build.addbuildtag]shortsha-$SHORT_SHA"
+# Deploy stage for deploying the application to Azure 
+- stage: DeployUI
+  displayName: 'Deploy to UI application'
+  dependsOn: BuildUI
+  condition: succeeded()
+  jobs:
+    - job: Deploy
+      # environment: 'develop'
+      steps:
+# Downloads the 'drop' artifact from the Build stage.
+          - task: DownloadBuildArtifacts@1
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'UI'
+              tags: 'shortsha-$(shortSha)'
+              downloadPath: '$(System.ArtifactsDirectory)'
+# Deploys the package to an Azure Web App.
+          - task: AzureRmWebAppDeployment@5
+            inputs:
+              ConnectionType: 'AzureRM'
+# Uses a service connection for Azure authentication.
+              azureSubscription: '$(serviceconnection)'
+              appType: 'webApp'
+              WebAppName: '$(UIWebapp)'
+# Path to the ZIP package for deployment.
+              packageForLinux: '$(System.ArtifactsDirectory)/UI/**/*.zip'
+- stage: BuildAPI
+  displayName: 'Build API'
+  dependsOn: DeployUI
+  variables:
+    buildConfiguration: $[stageDependencies.CustomerConfig.DetermineConfig.outputs['GetConfigFile.buildConfiguration']]
+  jobs:
+  - job: Build
+    steps:
+      - checkout: self
+# Installs NuGet tool version 6.13.2 for package restoration.
+      - task: NuGetToolInstaller@1
+        inputs:
+          versionSpec: '6.13.2'
+          checkLatest: true
+# Restores NuGet packages for the solutions.
+      - task: NuGetCommand@2
+        displayName: 'Restore NuGet packages'
+        inputs:
+          command: 'restore'
+          restoreSolution: '**/SCJMAPI.sln'
+          feedsToUse: 'select'
+# Builds the solution using MSBuild, creating a web deployment package.      
+      - task: VSBuild@1
+        inputs:
+          solution: '**/SCJMAPI.sln'
+# Configures deployment, packaging, and output location.
+          msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
+          clean:  true
+          platform: 'Any CPU'
+          configuration: '$(buildConfiguration)'
+      - task: Bash@3
+        displayName: 'Get-shortsha'
+        inputs:
+         targetType: 'inline'
+         script: |
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
+          echo "$SHORT_SHA:$SHORT_SHA:$SHORT_SHORT"
+# Copies all files from artifact staging directory.
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: '$(build.artifactStagingDirectory)'
+          Contents: '**'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)'
+# Publishes build artifacts as 'drop' for use in later stages.
+      - task: PublishBuildArtifacts@1
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'API'
+          publishLocation: 'Container'
+      - task: Bash@3
+        displayName: 'Tag build with short SHA'
+        inputs:
+         targetType: 'inline'
+         script: |
+           SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+           echo "Triggering build for short SHA: $SHORT_SHA"
+           echo "##vso[build.addbuildtag]shortsha-$SHORT_SHA"
+           
+# Deploy stage for deploying the application to Azure 
+- stage: DeployAPI
+  displayName: 'Deploy API'
+  dependsOn: BuildAPI
+  condition: succeeded()
+  # variables:
+  #  artifactName: 'webapp'
+  jobs:
+    - job: Deploy
+      steps:
+# Downloads the 'drop' artifact from the Build stage.
+          - task: DownloadBuildArtifacts@1
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'API'
+              tags: 'shortsha-$(shortSha)'
+              downloadPath: '$(System.ArtifactsDirectory)'
+# Deploys the package to an Azure Web App.
+          - task: AzureRmWebAppDeployment@5
+            inputs:
+              ConnectionType: 'AzureRM'
+# Uses a service connection for Azure authentication.
+              azureSubscription: '$(serviceconnection)'
+              appType: 'webApp'
+              WebAppName: '$(APIWebapp)'
+# Path to the ZIP package for deployment.
+              packageForLinux: '$(System.ArtifactsDirectory)/API/**/*.zip'
+
+
+- stage: ReleaseVersioning
+  displayName: 'Create Release Branch'
+  dependsOn: DeployStagingProductionUI
+  condition: succeeded()
+  jobs:
+    - deployment: CreateRelease
+      displayName: 'Create Release Branch'
+      environment: 'DEV'   
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - checkout: self
+                persistCredentials: true
+                fetchDepth: 0
+
+              - task: PowerShell@2
+                name: CreateReleaseBranch
+                displayName: 'Create release branch'
+                inputs:
+                  targetType: 'inline'
+                  script: |
+                    Write-Host "Starting script..."
+                    Write-Host "Organisation: $env:Organisation"
+                    
+
+                    $pat = $env:PAT
+                    $organization = $env:Organisation
+                    $repositoryId = $env:repositoryId
+                    $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+                    $headers = @{ Authorization = "Basic $token"  }
+
+                    $Baseuri = "https://dev.azure.com/$organization/"
+                    $targetBranch = "refs/heads/develop"
+                    $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
+                    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+
+                    if ($response.count -eq 0) {
+                      Write-Host "No completed PRs found. Defaulting to 'minor'."
+                      $changeType = "minor"
+                      $buildConfiguration = "Release"
+                    } else {
+                      $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
+                      $title = $latestPR.title
+
+                    if ($title -match '(?i)\bmajor\b') {
+                        $changeType = "major"
+                      } else {
+                        $changeType = "minor"
+                      }
+                    }
+                    Write-Host "Determined CHANGE_TYPE: $changeType"
+                    git fetch --all
+                    $branches = git branch -r | Where-Object { $_ -match 'origin/Release/\d+\.\d+-rc$' } | ForEach-Object {
+                        ($_ -replace 'origin/Release/', '') -replace '-rc', ''
+                    }
+
+                    if (-not $branches) {
+                        $major = 1
+                        $minor = 0
+                    } else {
+                        $latest = $branches | Sort-Object { [version]$_ } | Select-Object -Last 1
+                        Write-Host "Latest version found: $latest"
+
+                        $parts = $latest -split '\.'
+                        $major = [int]$parts[0]
+                        $minor = [int]$parts[1]
+
+                        if ($changeType -eq "major") {
+                            $major++
+                            $minor = 0
+                        } else {
+                            $minor++
+                        }
+                    }
+
+                    $version = "$major.$minor-rc"
+                    $tag = "v$version"
+                    $branchName = "Release/$version"
+
+                    Write-Host "Creating branch: $branchName"
+                    git checkout -b $branchName
+                    git push origin $branchName
+
+                    Write-Host "##vso[task.setvariable variable=releaseBranch;isOutput=true]$branchName"
+                    Write-Host "##vso[task.setvariable variable=releaseTag;isOutput=true]$tag"
+                env:
+                  PAT: $(PAT)
+                  Organisation: $(Organisation)
+                  repositoryId: $(repositoryId)
