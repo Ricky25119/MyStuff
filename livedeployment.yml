@@ -1,0 +1,76 @@
+
+trigger: 
+    - none
+
+
+parameters:
+  - name: UIWebApps
+    displayName: Select Customer UIWebapps
+    type: string
+    default: 'kent'
+    values:
+      - kent
+      - customer1
+      - customer2
+      - customer3
+      - customer4
+      - customer5
+      - customer6
+      - customer7
+      - customer8
+  - name: APIWebApps
+    displayName: Select Customer APIWebapps
+    type: string
+    default: 'kent'
+    values:
+      - kent
+      - customer1
+      - customer2
+      - customer3
+      - customer4
+      - customer5
+      - customer6
+      - customer7
+      - customer8
+  - name: ServiceConnections
+    displayName: Select Serviceconnection
+    type: string
+    default: 'S0'
+    values:
+      - S0
+      - S1
+      - S2
+      - S3
+      - S4
+      - S5
+      - S6
+      - S7
+      - S8
+stages:
+- stage: Build
+  displayName: 'Build & Publish Artifact'
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: NuGetToolInstaller@1
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'specific'
+        project: 'c70a2f22-0e6a-457d-a56f-4f6733761244'
+        pipeline: '19'
+        buildVersionToDownload: 'latest'
+        downloadType: 'single'
+        artifactName: 'drop'
+        downloadPath: '$(System.ArtifactsDirectory)'
+
+    - task: PowerShell@2
+      displayName: 'Consumed Artifact '
+      inputs:
+          targetType: 'inline'
+          script: |
+            Write-Host "Downloaded artifact from build triggered by the current merge."
+            Write-Host "Contents of $(System.ArtifactsDirectory):"
+            Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
+
