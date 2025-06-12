@@ -21,7 +21,7 @@ resource "azurerm_virtual_network" "main" {
 }
 
 resource "azurerm_subnet" "bastion" {
-  name                 = "BastionSubnet"
+  name                 = "AzureBastionSubnet"
   resource_group_name  = azurerm_resource_group.main.name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = ["10.0.0.0/24"]
@@ -48,7 +48,7 @@ resource "azurerm_subnet" "storage" {
   address_prefixes     = ["10.0.3.0/24"]
 }
 
-# NSG and association
+# NSG for VMs
 resource "azurerm_network_security_group" "vm_nsg" {
   name                = "vm-nsg"
   location            = var.location
@@ -72,6 +72,29 @@ resource "azurerm_subnet_network_security_group_association" "vm" {
   network_security_group_id = azurerm_network_security_group.vm_nsg.id
 }
 
+# NAT Gateway for outbound internet access
+resource "azurerm_public_ip" "nat" {
+  name                = "nat-ip"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = var.location
+  allocation_method   = "Static"
+  sku                 = "Standard"
+}
+
+resource "azurerm_nat_gateway" "nat" {
+  name                = "nat-gateway"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.main.name
+  sku_name            = "Standard"
+
+  public_ip_ids = [azurerm_public_ip.nat.id]
+}
+
+resource "azurerm_subnet_nat_gateway_association" "vm" {
+  subnet_id      = azurerm_subnet.vm.id
+  nat_gateway_id = azurerm_nat_gateway.nat.id
+}
+
 # Azure Bastion
 resource "azurerm_public_ip" "bastion" {
   name                = "bastion-ip"
@@ -86,7 +109,6 @@ resource "azurerm_bastion_host" "bastion" {
   location            = var.location
   resource_group_name = azurerm_resource_group.main.name
 
-  dns_name            = "ai-bastion-host"
   ip_configuration {
     name                 = "bastion-ipconfig"
     subnet_id            = azurerm_subnet.bastion.id
@@ -94,7 +116,7 @@ resource "azurerm_bastion_host" "bastion" {
   }
 }
 
-# Storage Account (ZRS, private access)
+# Storage Account (private access)
 resource "azurerm_storage_account" "shared" {
   name                     = "aisharedstorage01"
   resource_group_name      = azurerm_resource_group.main.name
@@ -129,7 +151,20 @@ resource "azurerm_storage_container" "standard" {
   container_access_type = "private"
 }
 
-# Main AI VM
+# Network Interface for AI VM
+resource "azurerm_network_interface" "ai_nic" {
+  name                = "ai-vm-nic"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.vm.id
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+# AI VM
 resource "azurerm_windows_virtual_machine" "ai_vm" {
   name                = "main-ai-vm"
   resource_group_name = azurerm_resource_group.main.name
@@ -151,8 +186,9 @@ resource "azurerm_windows_virtual_machine" "ai_vm" {
   }
 }
 
-resource "azurerm_network_interface" "ai_nic" {
-  name                = "ai-vm-nic"
+# Network Interface for Dev VM
+resource "azurerm_network_interface" "dev_nic" {
+  name                = "dev-vm-nic"
   location            = var.location
   resource_group_name = azurerm_resource_group.main.name
 
@@ -163,7 +199,7 @@ resource "azurerm_network_interface" "ai_nic" {
   }
 }
 
-# Secondary Dev VM
+# Dev VM
 resource "azurerm_windows_virtual_machine" "dev_vm" {
   name                = "dev-vm"
   resource_group_name = azurerm_resource_group.main.name
@@ -182,17 +218,5 @@ resource "azurerm_windows_virtual_machine" "dev_vm" {
     offer     = "WindowsServer"
     sku       = "2022-datacenter"
     version   = "latest"
-  }
-}
-
-resource "azurerm_network_interface" "dev_nic" {
-  name                = "dev-vm-nic"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.main.name
-
-  ip_configuration {
-    name                          = "internal"
-    subnet_id                     = azurerm_subnet.vm.id
-    private_ip_address_allocation = "Dynamic"
   }
 }
