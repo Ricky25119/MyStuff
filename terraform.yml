@@ -1,0 +1,12 @@
+  - task: Bash@3
+    displayName: 'Terraform Plan with -var Parameters'
+    inputs:
+      targetType: 'inline'
+      script: |
+        terraform plan \
+          -var="databricks_account_id=$(databricks_account_id)" \
+          -var="databricks_account_console_url=$(databricks_account_console_url)" \
+          -var="databricks_admin_username=$(databricks_admin_username)" \
+          -var="databricks_admin_password=$(databricks_admin_password)" \
+          -var="azure_sp_client_id=$(azure_sp_client_id)" \
+          -var="metastore_name=$(metastore_name)"
