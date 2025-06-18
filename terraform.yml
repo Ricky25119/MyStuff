@@ -10,3 +10,9 @@
           -var="databricks_admin_password=$(databricks_admin_password)" \
           -var="azure_sp_client_id=$(azure_sp_client_id)" \
           -var="metastore_name=$(metastore_name)"
+- script: |
+      echo "Environment Variables from Variable Group:"
+      echo "MY_API_KEY: $(MY_API_KEY)"
+      echo "ENVIRONMENT: $(ENVIRONMENT)"
+      echo "DB_SERVER: $(DB_SERVER)"
+    displayName: 'Print Variable Group Variables'
