@@ -1,4 +1,4 @@
-- task: PowerShell@2
+ - task: PowerShell@2
       displayName: 'Replace appsettings.json with selected environment file'
       inputs:
         targetType: 'inline'
@@ -17,3 +17,9 @@
             Write-Error " File $envFile not found!"
             exit 1
           }
+    - task: PowerShell@2
+      displayName: 'Debug .csproj path'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Get-ChildItem -Path "$(Build.SourcesDirectory)/$(projectFolder)" -Filter *.csproj -Recurse
