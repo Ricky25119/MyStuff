@@ -68,10 +68,13 @@ stages:
               $tag = $labelResponse.value[0].name
               Write-Host "Found tag: $tag"
               $regex = '^GBI_\d+\.\d+\.\d+(\.\d+)?$'
-              if ($tag -notmatch $regex) {
-                Write-Error "Tag '$tag' does not match the expected format (e.g., GBI_3.9.0 or GBI_3.3.0.0)."
-                exit 1
-                }
+              $m = [regex]::Match($tag, $regex)
+              if (-not $m.Success) {
+                  Write-Error "Tag '$tag' does not match the expected format (e.g., GBI_3.9.0 or GBI_3.3.0.5)."
+                  exit 1
+              }
+              
+
               Write-Host "Valid tag format: $tag"
               Write-Host "Change Type : $changeType , Config: $buildConfiguration,PR title: $title, PR Description: $description,PR raised to: $PrRaisedTo, Tag Mentioned: $tag  "
               Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$tag"
@@ -87,7 +90,7 @@ stages:
   dependsOn: CustomerExtraction
   condition: succeeded()
   variables:
-    tag: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.tag']]
+    upackVersion: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.upackVersion']]
   jobs:
   - job: Build
     displayName: 'Build and Package'
@@ -121,11 +124,10 @@ stages:
       inputs:
         command: 'publish'
         publishDirectory: '$(Build.ArtifactStagingDirectory)'
-        feedsToUse: 'internal'
-        vstsFeedPublish: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'  # Replace this with your feed ID or name
-        vstsFeedPackagePublish: 'Workbench'
-        versionOption: 'custom'
-        versionPublish: '$(tag)'  # Customize versioning if needed
+        feedsToUsePublish: 'internal'
+        vstsFeedPublish: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
+        vstsFeedPackagePublish: 'workbench'
+        versionOption: 'major'
 
 - stage: DeployAPI
   displayName: 'Deploy API'
@@ -148,8 +150,8 @@ stages:
               downloadDirectory: '$(System.ArtifactsDirectory)/api'
               feedsToUse: 'internal'
               vstsFeed: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
-              vstsFeedPackage: 'Workbench'
-              vstsPackageVersion: '$(tag)'  # Same as used during publish
+              vstsFeedPackage: '476a8c24-5db1-445a-bcaf-9120a9639a03'
+              vstsPackageVersion: '4.0.0'
 
           - task: ArchiveFiles@2
             inputs:
@@ -168,94 +170,11 @@ stages:
               WebAppName: '$(APIWebapp)'
               packageForLinux: '$(System.ArtifactsDirectory)/api.zip'
 
-
-
-# - stage: BuildUI
-#   displayName: 'Build UI'
-#   variables:
-#     buildConfiguration: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.buildConfiguration']]
-#   dependsOn: DeployStagingProductionAPI
-#   jobs:
-#   - job: Build
-#     pool:
-#       vmImage: 'windows-latest'
-#     steps:
-#     - task: NuGetToolInstaller@1
-#     - task: NuGetCommand@2
-#       inputs:
-#         restoreSolution: '**/ASP_dotnet.sln'
-#     - task: VSBuild@1
-#       inputs:
-#         solution: '**/ASP_dotnet.sln'
-#         msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(Build.ArtifactStagingDirectory)"'
-#         platform: 'Any CPU'
-#         configuration: '$(buildConfiguration)'    
-#     - task: Bash@3
-#       displayName: 'Get short SHA'
-#       inputs:
-#         targetType: 'inline'
-#         script: |
-#           SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
-#           echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
-#           echo "SHORT_SHA: $SHORT_SHA"
-#     - task: PublishBuildArtifacts@1
-#       inputs:
-#         PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-#         ArtifactName: 'Webapp'
-#         publishLocation: 'Container'
-#   # Tag build with short SHA
-#     - task: Bash@3
-#       displayName: 'Tag build with short SHA'
-#       inputs:
-#         targetType: 'inline'
-#         script: |
-#           SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
-#           echo "Triggering build for short SHA: $SHORT_SHA"
-#           echo "##vso[build.addbuildtag]shortsha-$SHORT_SHA"
-
-# # Stage 3: Deploy to Staging and Production
-# - stage: DeployStagingProductionUI
-#   displayName: 'Deploy Dev UI'
-#   dependsOn: BuildUI
-#   condition: succeeded()
-#   jobs:
-#     - deployment: DeployStaging
-#       displayName: 'Deploy to Staging Slot'
-#       environment: 'Staging'
-#       strategy:
-#         runOnce:
-#           deploy:
-#             steps:
-#               - task: DownloadBuildArtifacts@1
-#                 inputs:
-#                   buildType: 'current'
-#                   downloadType: 'single'
-#                   artifactName: 'Webapp'
-#                   tags: 'shortsha-$(shortSha)'
-#                   downloadPath: '$(System.ArtifactsDirectory)'
-#                 displayName: 'Download Artifacts'
-
-#               - task: PowerShell@2
-#                 displayName: 'Consumed Artifact '
-#                 inputs:
-#                   targetType: 'inline'
-#                   script: |
-#                     Write-Host "Downloaded artifact from build triggered by the current merge."
-#                     Write-Host "Contents of $(System.ArtifactsDirectory):"
-#                     Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
-
-#               - task: AzureRmWebAppDeployment@5
-#                 inputs:
-#                   ConnectionType: 'AzureRM'
-#                   azureSubscription: '$(serviceconnection)'
-#                   appType: 'webApp'
-#                   WebAppName: '$(UIWebapp)'
-#                   packageForLinux: '$(System.ArtifactsDirectory)/Webapp/**/*.zip'
-#                 displayName: 'Deploy to Staging Slot'
-
 - stage: ReleaseVersioning
   displayName: 'Create Release Branch'
-  dependsOn: DeployStagingProductionAPI
+  dependsOn: DeployAPI
+  variables:
+    tag: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.tag']]
   condition: succeeded()
   jobs:
   - deployment: CreateRelease
@@ -295,72 +214,90 @@ stages:
                     $title = $latestPR.title
                     $description = $latestPR.description
                     $PrRaisedTo = $latestPR.targetRefName
-                    if ($description -match "(?i)buildConfiguration\s*=\s*'([^']+)'") {
-                        $buildConfiguration = $matches[1]
-                    } else {
-                        $buildConfiguration = "Release"
                     }
-                  Write-Host "Customer Name: $buildConfiguration"
-                  if ($title -match '(?i)\bmajor\b') {
-                      $changeType = "major"
-                    } else {
-                      $changeType = "minor"
-                    }
-                  }
-                  Write-Host "Determined CHANGE_TYPE: $changeType"
-                  git fetch --all
-                  $branches = git branch -r | Where-Object { $_ -match 'origin/Release/\d+\.\d+-rc$' } | ForEach-Object {
-                      ($_ -replace 'origin/Release/', '') -replace '-rc.*$', ''
-                  }
-                  if (-not $branches) {
-                      $major = 1
-                      $minor = 0
-                  } else {
-                      $latest = $branches | Sort-Object { [version]$_ } | Select-Object -Last 1
-                      Write-Host "Latest version found: $latest"
-                      $parts = $latest -split '\.'
-                      $major = [int]$parts[0]
-                      $minor = [int]$parts[1]
-                      if ($changeType -eq "major") {
-                          $major++
-                          $minor = 0
-                      } else {
-                          $minor++
-                      }
-                  }
-                  $version = "$major.$minor-rc-$buildConfiguration"
-                  $tag = "v$version"
-                  $branchName = "Release/$version"
-                  $tagName = "v$version"
-                  Write-Host "Creating branch: $branchName"
-                  git checkout -b $branchName
-                  git push origin $branchName
-                  Write-Host "Creating tag: $tagName"
-                  git tag $tagName
-                  git push origin $tagName
-                  Write-Host "##vso[task.setvariable variable=releaseBranch;isOutput=true]$branchName"
-                  Write-Host "##vso[task.setvariable variable=releaseTag;isOutput=true]$tag"
-                  Write-Host "##vso[task.setvariable variable=version;isOutput=true]$version"
+
               env:
                 PAT: $(PAT)
                 Organisation: $(Organisation)
                 repositoryId: $(repositoryId)
                 CustomerName: $(customerName)
+            - task: PowerShell@2
+              displayName: 'Check/Create release/$TAG from develop'
+              inputs:
+                targetType: 'inline'
+                script: |
+                  $ErrorActionPreference = "Stop"
 
-            - task: DownloadBuildArtifacts@1
+                  if (-not $env:TAG) {
+                    Write-Error "TAG variable is not set. Make sure it is exported from the previous step."
+                    exit 1
+                  }
+
+                  git config user.email "build@dev.azure.com"
+                  git config user.name  "Azure Pipelines"
+
+                  git fetch origin --prune
+
+                  $branchName = "release/$env:TAG"
+                  $exists = git ls-remote --heads origin $branchName
+
+                  if (-not $exists) {
+                    Write-Host "Release branch $branchName does not exist. Creating from origin/develop..."
+                    git checkout -b $branchName origin/develop
+                    git push -u origin $branchName
+                  } else {
+                    Write-Host "Release branch $branchName already exists."
+                  }
+              env:
+                TAG: $(tag)
+            - task: PowerShell@2
+              displayName: 'Merge develop into release branches ≥ TAG'
               inputs:
-                buildType: 'current'
-                downloadType: 'single'
-                artifactName: 'drop'
-                downloadPath: '$(System.ArtifactsDirectory)'
-            - task: UniversalPackages@0
-              displayName: 'Publish artifact to Azure Artifacts'
-              inputs:
-                command: 'publish'
-                publishDirectory: '$(System.ArtifactsDirectory)/drop'
-                feedsToUsePublish: 'internal'
-                vstsFeedPublish: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
-                vstsFeedPackagePublish: 'Workbench'
-                versionOption: 'custom'
-                versionPublish: '$(version)'
+                targetType: 'inline'
+                script: |
+                  $ErrorActionPreference = "Stop"
+
+                  if (-not $env:TAG) {
+                    Write-Error "TAG variable is not set. Make sure it is exported from the previous step."
+                    exit 1
+                  }
+
+                  git config user.email "build@dev.azure.com"
+                  git config user.name  "Azure Pipelines"
+
+                  git fetch origin --prune
+
+                  # Get all remote release branches
+                  $releaseBranches = (git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release/*) -split "`n"
+
+                  if (-not $releaseBranches -or $releaseBranches.Count -eq 0) {
+                    Write-Host "No remote release branches found."
+                    exit 0
+                  }
+
+                  foreach ($branch in $releaseBranches) {
+                    $branch = $branch.Trim()
+                    $branchRel = $branch -replace '^release/', ''
+
+                    # Compare version numbers using sort -V
+                    $sorted = & bash -c "printf '%s\n' '$env:TAG' '$branchRel' | sort -V"
+                    $first = ($sorted -split "`n")[0]
+
+                    if ($first -eq $env:TAG) {
+                      Write-Host "Updating $branch from develop (since $branchRel >= $env:TAG)"
+
+                      git checkout -B $branch "origin/$branch"
+                      try {
+                        git merge --no-ff --no-edit origin/develop
+                      } catch {
+                        Write-Error "Merge conflict in branch $branch. Resolve manually."
+                        exit 1
+                      }
+                      git push origin "HEAD:refs/heads/$branch"
+                    } else {
+                      Write-Host "Skipping $branch (since $branchRel < $env:TAG)"
+                    }
+                  }
+              env:
+                TAG: $(tag)
 
