@@ -173,8 +173,6 @@ stages:
 - stage: ReleaseVersioning
   displayName: 'Create Release Branch'
   dependsOn: DeployAPI
-  variables:
-    tag: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.tag']]
   condition: succeeded()
   jobs:
   - deployment: CreateRelease
@@ -194,27 +192,39 @@ stages:
               inputs:
                 targetType: 'inline'
                 script: |
-                  Write-Host "Starting script..."
-                  Write-Host "Organisation: $env:Organisation"
-                  $pat = $env:PAT
-                  $organization = $env:Organisation
-                  $repositoryId = $env:repositoryId
-                  $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
-                  $headers = @{ Authorization = "Basic $token"  }
-                  $Baseuri = "https://dev.azure.com/$organization/"
-                  $targetBranch = "refs/heads/develop"
-                  $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
-                  $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
-                  if ($response.count -eq 0) {
-                    Write-Host "No completed PRs found. Defaulting to 'minor'."
-                    $changeType = "minor"
-                    $buildConfiguration = "Release"
-                  } else {
+                    Write-Host "Starting script..."
+                    Write-Host "Organisation: $env:Organisation"
+                    
+
+                    $pat = $env:PAT
+                    $organization = $env:Organisation
+                    $repositoryId = $env:repositoryId
+                    $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+                    $headers = @{ Authorization = "Basic $token"  }
+
+                    $Baseuri = "https://dev.azure.com/$organization/"
+                    $targetBranch = "refs/heads/develop"
+                    $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
+                    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+
+                    if ($response.count -eq 0) {
+                      Write-Host "No completed PRs found."
+                      exit 1
+                    } 
                     $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
+                    $prId = $latestPR.pullRequestId
                     $title = $latestPR.title
                     $description = $latestPR.description
                     $PrRaisedTo = $latestPR.targetRefName
+                    $labelUri = "${Baseuri}_apis/git/repositories/$repositoryId/pullRequests/$prId/labels?api-version=7.1"
+                    $labelResponse = Invoke-RestMethod -Uri $labelUri -Method Get -Headers $headers
+                    if (-not $labelResponse.value -or $labelResponse.value.Count -eq 0) {
+                      Write-Error "No labels (tags) found on the PR. Expected a tag like GBI_3.9.0"
+                      exit 1
                     }
+                    $tag = $labelResponse.value[0].name
+                    Write-Host "Found tag: $tag"
+                    Write-Host "##vso[task.setvariable variable=tag]$tag"
 
               env:
                 PAT: $(PAT)
@@ -251,14 +261,15 @@ stages:
               env:
                 TAG: $(tag)
             - task: PowerShell@2
-              displayName: 'Merge develop into release branches ≥ TAG'
+              displayName: 'Merge develop into existing release branch'
               inputs:
                 targetType: 'inline'
                 script: |
                   $ErrorActionPreference = "Stop"
 
-                  if (-not $env:TAG) {
-                    Write-Error "TAG variable is not set. Make sure it is exported from the previous step."
+                  $tag = $env:TAG
+                  if (-not $tag) {
+                    Write-Error "TAG variable is not set. Make sure it is defined in the pipeline."
                     exit 1
                   }
 
@@ -267,37 +278,31 @@ stages:
 
                   git fetch origin --prune
 
-                  # Get all remote release branches
-                  $releaseBranches = (git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release/*) -split "`n"
+                  $releaseBranch = "release/$tag"
 
-                  if (-not $releaseBranches -or $releaseBranches.Count -eq 0) {
-                    Write-Host "No remote release branches found."
+                  # Check if the release branch exists remotely
+                  $branchExists = git ls-remote --heads origin $releaseBranch
+                  if (-not $branchExists) {
+                    Write-Host "Release branch $releaseBranch does not exist. Skipping merge."
                     exit 0
                   }
 
-                  foreach ($branch in $releaseBranches) {
-                    $branch = $branch.Trim()
-                    $branchRel = $branch -replace '^release/', ''
+                  Write-Host "Merging develop into $releaseBranch"
 
-                    # Compare version numbers using sort -V
-                    $sorted = & bash -c "printf '%s\n' '$env:TAG' '$branchRel' | sort -V"
-                    $first = ($sorted -split "`n")[0]
+                  git checkout develop
+                  git pull origin develop
 
-                    if ($first -eq $env:TAG) {
-                      Write-Host "Updating $branch from develop (since $branchRel >= $env:TAG)"
+                  git checkout -B $releaseBranch origin/$releaseBranch
 
-                      git checkout -B $branch "origin/$branch"
-                      try {
-                        git merge --no-ff --no-edit origin/develop
-                      } catch {
-                        Write-Error "Merge conflict in branch $branch. Resolve manually."
-                        exit 1
-                      }
-                      git push origin "HEAD:refs/heads/$branch"
-                    } else {
-                      Write-Host "Skipping $branch (since $branchRel < $env:TAG)"
-                    }
+                  try {
+                    git merge --no-ff --no-edit origin/develop
+                  } catch {
+                    Write-Error "Merge conflict occurred while merging develop into $releaseBranch. Resolve manually."
+                    exit 1
                   }
+
+                  git push origin $releaseBranch
               env:
                 TAG: $(tag)
+
 
