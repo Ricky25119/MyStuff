@@ -1,0 +1,224 @@
+trigger: 
+    - none
+
+variables:
+  - group: Workbench
+parameters:
+  - name: Customer
+    displayName: Select Customer 
+    type: string
+    default: 'Test'
+    values:
+      - Kent
+      - CustomerZero
+      - CAM
+      - GM
+      - NARP(NCR)
+      - Banes
+      - TVS
+      - Staffs(OHC) 
+      - Test
+  - name: ServiceConnections
+    displayName: Select Serviceconnection
+    type: string
+    default: 'CareCentric-Workbench'
+    values:
+      - S0
+      - S1
+      - S2
+      - S3
+      - S4
+      - S5
+      - S6
+      - S7
+      - CareCentric-Workbench
+  - name: ArtifactVersion
+    displayName: Provide the artifact version
+    type: string
+    default: 'latest'
+stages:
+- stage: Build
+  displayName: 'Build & Publish Artifact'
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+
+        - task: PowerShell@2
+          name: SetArtifactVersion
+          displayName: 'Extract customer and check change type'
+          inputs:
+            targetType: 'inline'
+            script: |
+              Write-Host "Checking whether to use the specified or latest version ..."
+              $artifactVersion = '${{parameters.ArtifactVersion}}'
+              
+              $pat = $env:PAT
+              $organization = $env:Organisation
+              $repositoryId = $env:repositoryId
+              $project = "CareCentric-BI"
+              $feedId  = "13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299"
+              $packageId = "test_workbench"
+              
+              $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+              $headers = @{ Authorization = "Basic $token" }
+              
+              
+              if ($artifactVersion -and $artifactVersion ne "latest"){
+                Write-Host "Using provided artifact version: $artifactVersion"
+                Write-Host "##vso[task.setvariable variable=artifactToUse;isOutput=true]$artifactVersion"
+                exit 0
+              }
+              Write-Host "No artifact version provided using latest version to deploy"
+              $uri = "https://feeds.dev.azure.com/$organization/$project/_apis/packaging/feeds/$feedId/UPack/packages/$packageId/versions?api-version=6.0-preview.1"
+              $response_artifact = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+              
+              if (-not $response_artifact.value) {
+                Write-Error "No package versions found."
+                exit 1
+              }
+              
+              $versions_artifact = $response_artifact.value.version
+              $sortedVersions_branch = $versions_artifact | Sort-Object {[version]$_} -Descending
+              $latest_artifact = $sortedVersions_branch[0]
+              
+              Write-Host "Latest version: $latest_artifact"
+              Write-Host "##vso[task.setvariable variable=artifactToUse;isOutput=true]$latest_artifact
+          env:
+            PAT: $(PAT)
+            Organisation: $(Organisation)
+
+            
+
+    # Downloads the Universal Packages.
+        - task: UniversalPackages@0
+          displayName: 'Download Universal Packages for UI'
+          inputs:
+            command: 'download'
+            downloadDirectory: '$(System.ArtifactsDirectory)/ui'
+            feedsToUse: 'internal'
+            vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
+            vstsFeedPackage: 'test_workbench'
+            vstsPackageVersion: '$(SetArtifactVersion.artifactToUse)'  
+
+        - task: UniversalPackages@0
+          displayName: 'Download Universal Packages for API'
+          inputs:
+            command: 'download'
+            downloadDirectory: '$(System.ArtifactsDirectory)/api'
+            feedsToUse: 'internal'
+            vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
+            vstsFeedPackage: 'test_workbench'
+            vstsPackageVersion: '$(SetArtifactVersion.artifactToUse)'    
+
+        - task: PowerShell@2
+          displayName: 'Consumed Artifact '
+          inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Downloaded artifact from build triggered by the current merge."
+                Write-Host "Contents of $(System.ArtifactsDirectory):"
+                Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
+        - task: PowerShell@2
+          displayName: 'Unzip Universal Package contents'
+          inputs:
+            targetType: 'inline'
+            script: |
+              $zipPath = "$(System.ArtifactsDirectory)/ui/ui.zip"
+                    $unzipDestination = "$(Build.SourcesDirectory)/unzipped"
+              
+                    if (Test-Path $zipPath) {
+                      Write-Host "Unzipping $zipPath to $unzipDestination"
+                      Expand-Archive -Path $zipPath -DestinationPath $unzipDestination -Force
+                    } else {
+                      Write-Error "Zip file not found at $zipPath"
+                      exit 1
+                    }
+
+        - task: PowerShell@2
+          displayName: 'Replace appsettings.json with selected environment file'
+          inputs:
+            targetType: 'inline'
+            script: |
+              $config = '${{parameters.Customer}}'
+              Write-Host " customerName : $config "
+              $envFile = "appsettings.$config.json"
+              #Update the project file path
+              $projectDir = "$(Build.SourcesDirectory)/API/ASP.net_core_API" 
+              $sourcePath = "$projectDir/$envFile"
+              $destPath = "$projectDir/appsettings.json"
+
+              if (Test-Path $sourcePath) {
+                Copy-Item -Path $sourcePath -Destination $destPath -Force
+                Write-Host " Replaced appsettings.json with $envFile"
+              } else {
+                Write-Error " File $envFile not found!"
+                exit 1
+              }
+        - task: PowerShell@2
+          displayName: 'Cleanup unused config files'
+          inputs:
+            targetType: 'inline'
+            script: |
+              $projectDir = "$(Build.SourcesDirectory)/$(projectFolder)"
+              $keepAppsettings = @("appsettings.json", "appsettings.$(buildConfiguration).json")
+              Get-ChildItem -Path $projectDir -Filter "appsettings.*.json" | Where-Object { $_.Name -notin $keepAppsettings } | Remove-Item -Force
+              # Get-ChildItem -Path $projectDir -Filter "web.*.config" | Where-Object { $_.Name -notin $keepWeb } | Remove-Item -Force
+              Write-Host "Cleaned up unused config files."
+
+        - task: PowerShell@2
+          name: SetWebApps
+          displayName: 'Set Web App Names based on Customer'
+          inputs:
+            targetType: 'inline'
+            script: |
+              $customer = "${{ parameters.UIWebApps }}"
+              $webApps = @{
+                "kent" = @{ UI = "kent-ui-webapp"; API = "kent-api-webapp" }
+                "CAM"  = @{ UI = "cam-ui"; API = "cam-api" }
+                "GM"   = @{ UI = "gm-ui"; API = "gm-api" }
+                "TVS"  = @{ UI = "tvs-ui"; API = "tvs-api" }
+                "Test" = @{ UI = "testgnpophweb"; API = "testgnpophwebapi" }
+                # Add all customer mappings here...
+              }
+        
+              if ($webApps.ContainsKey($customer)) {
+                $ui = $webApps[$customer].UI
+                $api = $webApps[$customer].API
+                Write-Host "UI Web App: $ui"
+                Write-Host "API Web App: $api"
+                Write-Host "##vso[task.setvariable variable=uiWebApp;isOutput=true]$ui"
+                Write-Host "##vso[task.setvariable variable=apiWebApp;isOutput=true]$api"
+              } else {
+                Write-Error "No web app mapping found for customer: $customer"
+                exit 1
+              }
+        - task: AzureWebApp@1
+          displayName: 'Deploy to UI Web App'
+          inputs:
+            azureSubscription: '${{parameters.ServiceConnections}}'
+            appType: 'webApp'
+            appName: 'SetWebApps.uiWebApp'
+            package: '$(Build.SourcesDirectory)/unzipped'
+            deploymentMethod: 'auto'
+      
+        - task: AzureWebApp@1
+          displayName: 'Deploy to API Web App'
+          inputs:
+            azureSubscription: '${{parameters.ServiceConnections}}'
+            appType: 'webApp'
+            appName: 'SetWebApps.apiWebApp'
+            package: '$(Build.SourcesDirectory)/unzipped'
+            deploymentMethod: 'auto'
+            
+  #       - task: AzureRmWebAppDeployment@5
+  #         inputs:
+  #           ConnectionType: 'AzureRM'
+  # # Uses a service connection for Azure authentication.
+  #           azureSubscription: '${{parameters.ServiceConnections}}'
+  #           appType: 'webApp'
+  #           WebAppName: '$(UIWebapp)'
+  # # Path to the ZIP package for deployment.
+  #           packageForLinux: '$(System.ArtifactsDirectory)/UI/**/*.zip'
+      
