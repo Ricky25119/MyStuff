@@ -1,86 +1,85 @@
 trigger:
-  branches:
-    include:
-      - Test_Workbench
+- none
 
 pool:
   vmImage: 'windows-latest'
 
 variables:
-  - group: Workbench
+  - group: Orchestration
+  - name: apiPipelinePath
+    value: 'API/API-Deployment.yml'
+  - name: uiPipelinePath
+    value: 'UI/UI-Deployment.yml'
+  - name: serviceconnection
+    value: 'Dotnet'
+  - name: APIWebapp
+    value: 'Apitestres'
+  - name: UIWebapp
+    value: 'testres'
 
 stages:
 
-### STAGE 1: Extract customer info
 - stage: CustomerExtraction
-  displayName: 'Determine the customer'
+  displayName: 'Determine the customer'  
   jobs:
     - job: ExtractCustomer
       displayName: 'Get customer spec'
       steps:
         - checkout: self
           persistCredentials: true
-# Fetch full history for accurate Git operations
           fetchDepth: 0
 
         - task: PowerShell@2
           name: CustomerName
-          displayName: 'Extract customer and check change type'
+          displayName: 'Extarct customer and check change type'
           inputs:
             targetType: 'inline'
             script: |
               Write-Host "Starting script..."
               Write-Host "Organisation: $env:Organisation"
               
+
               $pat = $env:PAT
-              $organization = "GraphnetDevOps"
-              $project = "CareCentric-BI"
-              $repositoryId = "410479a4-3e71-4287-b8b3-200009ba2eb0"
-
+              $organization = $env:Organisation
+              $repositoryId = $env:repositoryId
               $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
-              $headers = @{ Authorization = "Basic $token" }
+              $headers = @{ Authorization = "Basic $token"  }
+
               $Baseuri = "https://dev.azure.com/$organization/"
-
-              # === Get latest completed PRs targeting 'CentralOrchestration' ===
-              $targetBranch = "refs/heads/CentralOrchestration"
-              $uri_pr = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
-
-              $response = Invoke-RestMethod -Uri $uri_pr -Method Get -Headers $headers
-
+              $targetBranch = "refs/heads/develop"
+              $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
+              $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
 
               if ($response.count -eq 0) {
-              Write-Host "No completed PRs found."
-              }
+                Write-Host "No completed PRs found."
+                exit 1
+              } 
               $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
               $prId = $latestPR.pullRequestId
               $title = $latestPR.title
               $description = $latestPR.description
               $PrRaisedTo = $latestPR.targetRefName
-              $lable =$latestPR.labels
-              Write-Host "PrId:$prId , PRTitle: $title "
-              # === Get labels from PR ===
               $labelUri = "${Baseuri}_apis/git/repositories/$repositoryId/pullRequests/$prId/labels?api-version=7.1"
               $labelResponse = Invoke-RestMethod -Uri $labelUri -Method Get -Headers $headers
-              
               if (-not $labelResponse.value -or $labelResponse.value.Count -eq 0) {
-                Write-Error "No labels (tags) found on the PR. Expected a tag like GBIW_2.1"
+                Write-Error "No labels (tags) found on the PR. Expected a tag like GBI_3.9.0"
                 exit 1
               }
-              
               $tag = $labelResponse.value[0].name
               Write-Host "Found tag: $tag"
+              Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$tag"
               $regex = '^GBIW_\d+\.\d+$'
               $m = [regex]::Match($tag, $regex)
               if (-not $m.Success) {
-                Write-Error "Tag '$tag' does not match expected format (GBIW_x.y)"
-                exit 1
+                  Write-Error "Tag '$tag' does not match the expected format (e.g., GBIW_3.9 or GBIW_3.3.0.5)."
+                  exit 1
               }
               
+
               Write-Host "Valid tag format: $tag"
-              Write-Host "Change Type : $changeType , Config: $buildConfiguration, PR title: $title, PR Description: $description, PR raised to: $PrRaisedTo, Tag Mentioned: $tag"
-              Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$tag"
+              Write-Host "Change Type : $changeType , Config: $buildConfiguration,PR title: $title, PR Description: $description,PR raised to: $PrRaisedTo, Tag Mentioned: $tag  "
               
-              # Get all branch refs and determine highest version branch
+               # Get all branch refs and determine highest version branch
               $uri_branch = "${Baseuri}_apis/git/repositories/$repositoryId/refs?filter=heads/&api-version=6.1-preview.1"
               $response_branch = Invoke-RestMethod -Uri $uri_branch -Method Get -Headers $headers
               
@@ -117,383 +116,229 @@ stages:
               $branchShortName = $highestBranch.BranchName -replace '^refs/heads/', ''
               Write-Host "##vso[task.setvariable variable=highestBranch;isOutput=true]$branchShortName"
               
-              # # Get latest artifact version from feed
-          
-              $base64AuthInfo= [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$($connectionToken)"))
-              $url = 'https://feeds.dev.azure.com/GraphnetDevOps/CareCentric-BI/_apis/packaging/Feeds/poph_workbench_universal_artifact/Packages/2105b66f-a9cd-4fd6-a3c9-ff9623b597fa/versions?api-version=6.0-preview.1'
-              $PackageInfo = (Invoke-RestMethod -Uri $url -Method Get -UseDefaultCredential -Headers $headers)
-              if (-not $PackageInfo.value) {
-                              Write-Error "No package versions found."
-                              exit 1
-                            }
+             
+              $url = 'https://feeds.dev.azure.com/StarkNet01/Project%20ForgePoint/_apis/packaging/Feeds/Kent/Packages/476a8c24-5db1-445a-bcaf-9120a9639a03/versions?api-version=6.0-preview.1'
+              $PackageInfo = (Invoke-RestMethod -Uri $url -Method Get -UseDefaultCredential -Headers $headers) 
               $LatestVersion= $PackageInfo.value.version | Select-Object -first 1
-              Write-Host "Latest package Version = $LatestVersion"
-              Write-Host "##vso[task.setvariable variable=LatestVersion;isOutput=true]$LatestVersion"   
-          env:                   
-              PAT: $(PAT)
-              Organisation: $(Organisation)
-              repositoryId: $(repositoryId)
+              Write-Host "Latest package Version = $LatestVersion"
+              Write-Host "##vso[task.setvariable variable=LatestVersion;isOutput=true]$LatestVersion"
 
-
-# STAGE 2: Build UI
-
-- stage: BuildUI
-  displayName: 'Build UI'
+          env:
+            PAT: $(PAT)
+            Organisation: $(Organisation)
+            repositoryId: $(repositoryId)
+        
+# Stage: Build and Publish to Azure Artifacts
+- stage: BuildAPI
+  displayName: 'Build API'
   dependsOn: CustomerExtraction
+  condition: succeeded()
   variables:
     tag: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.tag']]
     existingbranch: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.highestBranch']]
     latest_artifact: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.LatestVersion']]
-    buildConfiguration: 'Release'
-    PackageName: 'ui-package'
-    DestinationFeed: 'feed-id'
   jobs:
-    - job: Build
-      steps:
-        - checkout: self
-## Installs NuGet tool version 6.13.2 for package restoration.
-        - task: PowerShell@2
-          name: RequiredVars
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "Latest version: $(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=ltst_Vesrion;isOutput=true]$(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
-              Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
-        - task: NuGetToolInstaller@1
-          inputs:
-            versionSpec: '6.13.2'
-            checkLatest: true
-## Restores NuGet packages for the solution.
-        - task: NuGetCommand@2
-          displayName: 'Restore NuGet packages'
-          inputs:
-            command: 'restore'
-            restoreSolution: '**/SCJM.sln'
-            feedsToUse: 'select'
+  - job: Build
+    displayName: 'Build and Package'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - task: PowerShell@2
+      name: SetEnvVars
+      displayName: 'Set up environment variables'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "tag :$(tag)"
+          Write-Host "existingbranch :$(existingbranch)"
+          Write-Host "latest_artifact :$(latest_artifact)"
+          Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
+          Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
+          Write-Host "##vso[task.setvariable variable=latest_artifact;isOutput=true]$(latest_artifact)"
+    - task: NuGetToolInstaller@1
 
-# Builds the solution using VSBuild, creating a web deployment package. 
-        - task: VSBuild@1
-          inputs:
-            solution: '**/SCJM.sln'
-# Configures deployment, packaging, and output location.
-            msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
-            clean: true
-            platform: 'Any CPU'
-            configuration: '$(buildConfiguration)'
+    - task: NuGetCommand@2
+      inputs:
+        restoreSolution: '**/ASP.NET_Core_API.sln'
 
+    - task: VSBuild@1
+      inputs:
+        solution: '**/ASP.NET_Core_API.sln'
+        msbuildArgs: '/p:DeployOnBuild=true'
+        platform: 'Any CPU'
+        configuration: 'Release'
 
-        - task: UniversalPackages@0
-          condition: ne(variables.tag,variables.existingbranch)
-          displayName: 'Publish Universal Package to Azure Artifacts'
-          inputs:
-            command: 'publish'
-            publishDirectory: '$(Build.ArtifactStagingDirectory)'
-            feedsToUsePublish: 'internal'
-            vstsFeedPublish: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-            vstsFeedPackagePublish: 'test_workbench'
-            versionOption: 'major'
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish ASP.NET Core API'
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: 'API/ASP.net_core_API/*.csproj'
+        arguments: '--configuration Release --output $(Build.ArtifactStagingDirectory)'
+        zipAfterPublish: false
 
-# Stage 3: Deploy UI to Azure WEb App 
-- stage: DeployUI
-  displayName: 'Deploy to UI application'
-  dependsOn: BuildUI
-  variables:
-    latest_artifact: $[stageDependencies.BuildUI.Build.outputs['RequiredVars.ltst_Vesrion']]
-    tag: $[stageDependencies.BuildUI.Build.outputs['RequiredVars.tag']]
-    existingbranch: $[stageDependencies.BuildUI.Build.outputs['RequiredVars.existingbranch']]
-  condition: succeeded()
-  # variables:
-  #   Feed: 'feed-id'
-  #   PackageName: 'ui-package'
-  jobs:
-    - job: Deploy
-      # environment: 'develop'
-      steps:
-      - task: PowerShell@2
-        name: RequiredVars
-        inputs:
-          targetType: 'inline'
-          script: |
-            Write-Host "Latest version: $(latest_artifact)"
-            Write-Host "##vso[task.setvariable variable=ltst_Vesrion;isOutput=true]$(latest_artifact)"
-            Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
-            Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
-# Downloads the Universal Packages.
-      - task: UniversalPackages@0
-        displayName: 'Download Universal Packages'
-        inputs:
-          command: 'download'
-          downloadDirectory: '$(System.ArtifactsDirectory)/ui'
-          feedsToUse: 'internal'
-          vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-          vstsFeedPackage: 'test_workbench'
-          vstsPackageVersion: '$(latest_artifact)'
-
-      - task: ArchiveFiles@2
-        inputs:
-          rootFolderOrFile: '$(System.ArtifactsDirectory)/ui'
-          includeRootFolder: false
-          archiveType: 'zip'
-          archiveFile: '$(System.ArtifactsDirectory)/ui.zip'
-          replaceExistingArchive: true
-
-# Deploys to Azure Web App.
-      - task: AzureRmWebAppDeployment@5
-        inputs:
-          ConnectionType: 'AzureRM'
-# Uses a service connection for Azure authentication.
-          azureSubscription: '$(serviceconnection)'
-          appType: 'webApp'
-          WebAppName: '$(UIWebapp)'
-# Path to the ZIP package for deployment.
-          packageForLinux: '$(System.ArtifactsDirectory)/UI/**/*.zip'
-- stage: BuildAPI
-  displayName: 'Build API'
-  variables:
-    latest_artifact: $[stageDependencies.DeployUI.Deploy.outputs['RequiredVars.ltst_Vesrion']]
-    tag: $[stageDependencies.DeployUI.Deploy.outputs['RequiredVars.ltst_Vesrion']]
-    existingbranch: $[stageDependencies.DeployUI.Deploy.outputs['RequiredVars.existingbranch']]
-  dependsOn: DeployUI
-  jobs:
-    - job: Build
-      steps:
-        - checkout: self
-# Installs NuGet tool version 6.13.2 for package restoration.
-        - task: PowerShell@2
-          name: RequiredVars
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "Latest version: $(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=ltst_Vesrion;isOutput=true]$(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
-              Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
-        - task: NuGetToolInstaller@1
-          inputs:
-            versionSpec: '6.13.2'
-            checkLatest: true
-# Restores NuGet packages for the solutions.
-        - task: NuGetCommand@2
-          displayName: 'Restore NuGet packages'
-          inputs:
-            command: 'restore'
-            restoreSolution: '**/SCJMAPI.sln'
-            feedsToUse: 'select'
-# Builds the solution using VSBuild, creating a web deployment package. 
-        - task: VSBuild@1
-          inputs:
-            solution: '**/SCJMAPI.sln'
-# Configures deployment, packaging, and output location.
-            msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
-            clean: true
-            platform: 'Any CPU'
-            configuration: '$(buildConfiguration)'
-
-        - task: UniversalPackages@0
-          condition: ne(variables.tag,variables.existingbranch)
-          inputs:
-            command: 'publish'
-            publishDirectory: '$(Build.ArtifactStagingDirectory)'
-            feedsToUsePublish: 'internal'
-            vstsFeedPublish: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-            vstsFeedPackagePublish: 'test_workbench_api'
-            versionOption: 'major'
-
-# STAGE 5: Deploy API
+    - task: UniversalPackages@0
+      displayName: 'Publish Universal Package to Azure Artifacts'
+      condition: and(ne(variables.tag, variables.existingbranch), ne(variables.existingbranch, ''))
+      inputs:
+        command: 'publish'
+        publishDirectory: '$(Build.ArtifactStagingDirectory)'
+        feedsToUsePublish: 'internal'
+        vstsFeedPublish: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
+        vstsFeedPackagePublish: 'workbench'
+        versionOption: 'major'
 
 - stage: DeployAPI
   displayName: 'Deploy API'
   dependsOn: BuildAPI
   condition: succeeded()
   variables:
-    latest_artifact: $[stageDependencies.BuildAPI.Build.outputs['RequiredVars.ltst_Vesrion']]
-    tag: $[stageDependencies.BuildAPI.Build.outputs['RequiredVars.ltst_Vesrion']]
-    existingbranch: $[stageDependencies.BuildAPI.Build.outputs['RequiredVars.existingbranch']]
-  # variables:
-  #   FeedName: 'feed-id'
-  #   PackageName: 'api-package'
+    tag: $[stageDependencies.BuildAPI.Build.outputs['SetEnvVars.tag']]
+    existingbranch: $[stageDependencies.BuildAPI.Build.outputs['SetEnvVars.existingbranch']]
+    latest_artifact: $[stageDependencies.BuildAPI.Build.outputs['SetEnvVars.latest_artifact']]
   jobs:
-    - job: Deploy
-      steps:
-#      Downloads the Universal Packages.
-        - task: PowerShell@2
-          name: RequiredVars
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "Latest version: $(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=ltst_Vesrion;isOutput=true]$(latest_artifact)"
-              Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
-              Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
-        - task: UniversalPackages@0
-          displayName: 'Download API Package'
-          inputs:
-            command: 'download'
-            downloadDirectory: '$(System.ArtifactsDirectory)/api'
-            feedsToUse: 'internal'
-            vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-            vstsFeedPackage: 'test_workbench_api'
-            vstsPackageVersion: '1.0.0'
+  - job: Deploy
+    displayName: 'Deploy and Package'
 
-        - task: ArchiveFiles@2
-          inputs:
-            rootFolderOrFile: '$(System.ArtifactsDirectory)/api'
-            includeRootFolder: false
-            archiveType: 'zip'
-            archiveFile: '$(System.ArtifactsDirectory)/api.zip'
-            replaceExistingArchive: true
+    steps:
+    - task: PowerShell@2
+      name: SetEnvVars
+      displayName: 'Set up environment variables'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "tag :$(tag)"
+          Write-Host "existingbranch :$(existingbranch)"
+          Write-Host "latest_artifact :$(latest_artifact)"
+          Write-Host "##vso[task.setvariable variable=tag;isOutput=true]$(tag)"
+          Write-Host "##vso[task.setvariable variable=existingbranch;isOutput=true]$(existingbranch)"
+          Write-Host "##vso[task.setvariable variable=latest_artifact;isOutput=true]$(latest_artifact)"
+    - task: UniversalPackages@0
+      displayName: 'Download Universal Package'
+      inputs:
+        command: 'download'
+        downloadDirectory: '$(System.ArtifactsDirectory)/api'
+        feedsToUse: 'internal'
+        vstsFeed: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
+        vstsFeedPackage: '476a8c24-5db1-445a-bcaf-9120a9639a03'
+        vstsPackageVersion: '$(latest_artifact)'
 
-# Deploys the package to an Azure Web App.
-        - task: AzureRmWebAppDeployment@5
-          displayName: 'Deploy to Azure Web App'
-          inputs:
-            ConnectionType: 'AzureRM'
-# Uses a service connection for Azure authentication.
-            azureSubscription: '$(serviceconnection)'
-            appType: 'webApp'
-            WebAppName: '$(APIWebapp)'
-# Path to the ZIP package for deployment.
-            packageForLinux: '$(System.ArtifactsDirectory)/api/**/*.zip'
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: '$(System.ArtifactsDirectory)/api'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(System.ArtifactsDirectory)/api.zip'
+        replaceExistingArchive: true
 
-# Stage 6: Create Release Branch and Merge Devlop into release branches(> current tag)# STAGE 6: Create Release Branch
+    - task: AzureRmWebAppDeployment@5
+      displayName: 'Deploy to Azure Web App'
+      inputs:
+        ConnectionType: 'AzureRM'
+        azureSubscription: '$(serviceconnection)'
+        appType: 'webApp'
+        WebAppName: '$(APIWebapp)'
+        packageForLinux: '$(System.ArtifactsDirectory)/api.zip'
 
 - stage: ReleaseVersioning
   displayName: 'Create Release Branch'
   dependsOn: DeployAPI
   variables:
-    tag: $[stageDependencies.CustomerExtraction.ExtractCustomer.outputs['CustomerName.tag']]
+    tag: $[stageDependencies.DeployAPI.Deploy.outputs['SetEnvVars.tag']]
+    existingbranch: $[stageDependencies.DeployAPI.Deploy.outputs['SetEnvVars.existingbranch']]
+    latest_artifact: $[stageDependencies.DeployAPI.Deploy.outputs['SetEnvVars.latest_artifact']]
   condition: succeeded()
   jobs:
-    - deployment: CreateRelease
-      displayName: 'Create Release Branch'
-      environment: 'DEV'   
-      strategy:
-        runOnce:
-          deploy:
-            steps:
-              - checkout: self
-                persistCredentials: true
-                fetchDepth: 0
-# Create release/<tag> branch if it doesn't exist
-              - task: PowerShell@2
-                name: CreateReleaseBranch
-                displayName: 'Create release branch'
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    Write-Host "Starting script..."
-                    Write-Host "Organisation: $env:Organisation"
-                    
+  - deployment: CreateRelease
+    displayName: 'Create Release Branch'
+    environment: 'Staging'   
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+              persistCredentials: true
+              fetchDepth: 0
+            - task: PowerShell@2
+              inputs:
+                targetType: 'inline'
+                script: |
+                  Write-Host "tag :$(tag)"
+                  Write-Host "existingbranch :$(existingbranch)"
+                  Write-Host "latest_artifact :$(latest_artifact)"
 
-                    $pat = $env:PAT
-                    $organization = $env:Organisation
-                    $repositoryId = $env:repositoryId
-                    $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
-                    $headers = @{ Authorization = "Basic $token"  }
+            - task: PowerShell@2
+              displayName: 'Check/Create release/$TAG from develop'
+              inputs:
+                targetType: 'inline'
+                script: |
+                  $ErrorActionPreference = "Stop"
 
-                    $Baseuri = "https://dev.azure.com/$organization/"
-                    $targetBranch = "refs/heads/Test_Workbench"
-                    $uri = "${Baseuri}_apis/git/repositories/$repositoryId/pullrequests?searchCriteria.status=completed&searchCriteria.targetRefName=$([uri]::EscapeDataString($targetBranch))&api-version=6.1-preview&`$top=100"
-                    $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers
+                  if (-not $env:TAG) {
+                    Write-Error "TAG variable is not set. Make sure it is exported from the previous step."
+                    exit 1
+                  }
 
-                    if ($response.count -eq 0) {
-                      Write-Host "No completed PRs found."
-                      exit 1
-                    } 
-                    $latestPR = $response.value | Sort-Object closedDate -Descending | Select-Object -First 1
-                    $prId = $latestPR.pullRequestId
-                    $title = $latestPR.title
-                    $description = $latestPR.description
-                    $PrRaisedTo = $latestPR.targetRefName
-                    $labelUri = "${Baseuri}_apis/git/repositories/$repositoryId/pullRequests/$prId/labels?api-version=7.1"
-                    $labelResponse = Invoke-RestMethod -Uri $labelUri -Method Get -Headers $headers
-                    if (-not $labelResponse.value -or $labelResponse.value.Count -eq 0) {
-                      Write-Error "No labels (tags) found on the PR. Expected a tag like GBIW_2.1.0"
-                      exit 1
-                    }
-                    $tag = $labelResponse.value[0].name
-                    Write-Host "Found tag: $tag"
-                    Write-Host "##vso[task.setvariable variable=tag]$tag"
+                  git config user.email "build@dev.azure.com"
+                  git config user.name  "Azure Pipelines"
 
-                env:
-                  PAT: $(PAT)
-                  Organisation: $(Organisation)
-                  repositoryId: $(repositoryId)
-                  CustomerName: $(customerName)
-## Create branch if it doesn't exist
-              - task: PowerShell@2
-                displayName: 'Check/Create release/$TAG from Test_Workbench'
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    $ErrorActionPreference = "Stop"
+                  git fetch origin --prune
 
-                    if (-not $env:TAG) {
-                      Write-Error "TAG variable is not set. Make sure it is exported from the previous step."
-                      exit 1
-                    }
+                  $branchName = "release/$env:TAG"
+                  $exists = git ls-remote --heads origin $branchName
 
-                    git config user.email "build@dev.azure.com"
-                    git config user.name  "Azure Pipelines"
+                  if (-not $exists) {
+                    Write-Host "Release branch $branchName does not exist. Creating from origin/develop..."
+                    git checkout -b $branchName origin/develop
+                    git push -u origin $branchName
+                  } else {
+                    Write-Host "Release branch $branchName already exists."
+                  }
+              env:
+                TAG: $(tag)
+            - task: PowerShell@2
+              displayName: 'Merge develop into existing release branch'
+              inputs:
+                targetType: 'inline'
+                script: |
+                  $ErrorActionPreference = "Stop"
 
-                    git fetch origin --prune
+                  $tag = $env:TAG
+                  if (-not $tag) {
+                    Write-Error "TAG variable is not set. Make sure it is defined in the pipeline."
+                    exit 1
+                  }
 
-                    $branchName = "release/$env:TAG"
-                    $exists = git ls-remote --heads origin $branchName
+                  git config user.email "build@dev.azure.com"
+                  git config user.name  "Azure Pipelines"
 
-                    if (-not $exists) {
-                      Write-Host "Release branch $branchName does not exist. Creating from origin/Test_Workbench..."
-                      git checkout -b $branchName origin/Test_Workbench
-                      git push -u origin $branchName
-                    } else {
-                      Write-Host "Release branch $branchName already exists."
-                    }
-                env:
-                  TAG: $(tag)
-# Merge develop into all release branches > current tag
-              - task: PowerShell@2
-                displayName: 'Merge Test_Workbench into release branches ≥ TAG'
-                inputs:
-                  targetType: 'inline'
-                  script: |
-                    $ErrorActionPreference = "Stop"
+                  git fetch origin --prune
 
-                    $tag = $env:TAG
-                    if (-not $tag) {
-                      Write-Error "TAG variable is not set. Make sure it is defined in the pipeline."
-                      exit 1
-                    }
+                  $releaseBranch = "release/$tag"
 
-                    git config user.email "build@dev.azure.com"
-                    git config user.name  "Azure Pipelines"
+                  # Check if the release branch exists remotely
+                  $branchExists = git ls-remote --heads origin $releaseBranch
+                  if (-not $branchExists) {
+                    Write-Host "Release branch $releaseBranch does not exist. Skipping merge."
+                    exit 0
+                  }
 
-                    git fetch origin --prune
+                  Write-Host "Merging develop into $releaseBranch"
 
-                    $releaseBranch = "release/$tag"
+                  git checkout develop
+                  git pull origin develop
 
-                    # Check if the release branch exists remotely
-                    $branchExists = git ls-remote --heads origin $releaseBranch
-                    if (-not $branchExists) {
-                      Write-Host "Release branch $releaseBranch does not exist. Skipping merge."
-                      exit 0
-                    }
+                  git checkout -B $releaseBranch origin/$releaseBranch
 
-                    Write-Host "Merging Test_Workbench into $releaseBranch"
+                  try {
+                    git merge --no-ff --no-edit origin/develop
+                  } catch {
+                    Write-Error "Merge conflict occurred while merging develop into $releaseBranch. Resolve manually."
+                    exit 1
+                  }
 
-                    git checkout Test_Workbench
-                    git pull origin Test_Workbench
+                  git push origin $releaseBranch
+              env:
+                TAG: $(tag)
 
-                    git checkout -B $releaseBranch origin/$releaseBranch
 
-                    try {
-                      git merge --no-ff --no-edit origin/Test_Workbench
-                    } catch {
-                      Write-Error "Merge conflict occurred while merging Test_Workbench into $releaseBranch. Resolve manually."
-                      exit 1
-                    }
-
-                    git push origin $releaseBranch
-                env:
-                  TAG: $(tag)
