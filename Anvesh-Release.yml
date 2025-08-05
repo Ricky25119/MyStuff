@@ -1,8 +1,8 @@
-trigger: 
-    - none
+trigger: none
 
 variables:
-  - group: Workbench
+  - group: Orchestration
+
 parameters:
   - name: Customer
     displayName: Select Customer 
@@ -16,209 +16,253 @@ parameters:
       - NARP(NCR)
       - Banes
       - TVS
-      - Staffs(OHC) 
+      - Staffs(OHC)
       - Test
-  - name: ServiceConnections
-    displayName: Select Serviceconnection
-    type: string
-    default: 'CareCentric-Workbench'
-    values:
-      - S0
-      - S1
-      - S2
-      - S3
-      - S4
-      - S5
-      - S6
-      - S7
-      - CareCentric-Workbench
+
   - name: ArtifactVersion
     displayName: Provide the artifact version
     type: string
     default: 'latest'
+
+  - name: ServiceConnections
+    displayName: Select Serviceconnection
+    type: string
+    default: 'Dotnet'
+    values:
+      - CareCentric-Workbench
+      - S0
+      - S1
+      - S2
+      - S3
+      - Dotnet
+
+  - name: Tag
+    type: string
+    default: 'refs/heads/main'
+
+resources:
+  repositories:
+  - repository: commonTemplates
+    type: git
+    name: Project ForgePoint/ASPNET_Application
+    ref: 'refs/heads/release/${{ parameters.Tag }}'
+
+
 stages:
+
 - stage: Build
-  displayName: 'Build & Publish Artifact'
+  displayName: 'Build & Deploy'
+
   jobs:
-  - job: Build
+  - job: DetectBranch
+    displayName: 'Detect Highest release Branch'
     pool:
       vmImage: 'windows-latest'
     steps:
 
-        - task: PowerShell@2
-          name: SetArtifactVersion
-          displayName: 'Extract customer and check change type'
-          inputs:
-            targetType: 'inline'
-            script: |
-              Write-Host "Checking whether to use the specified or latest version ..."
-              $artifactVersion = '${{parameters.ArtifactVersion}}'
-              
-              $pat = $env:PAT
-              $organization = $env:Organisation
-              $repositoryId = $env:repositoryId
-              $project = "CareCentric-BI"
-              $feedId  = "13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299"
-              $packageId = "test_workbench"
-              
-              $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
-              $headers = @{ Authorization = "Basic $token" }
-              
-              
-              if ($artifactVersion -and $artifactVersion ne "latest"){
-                Write-Host "Using provided artifact version: $artifactVersion"
-                Write-Host "##vso[task.setvariable variable=artifactToUse;isOutput=true]$artifactVersion"
-                exit 0
+
+    - checkout: commonTemplates
+
+
+    - task: PowerShell@2
+      name: detect
+      displayName: 'Detect release/GBIW Branch'
+      inputs:
+        targetType: 'inline'
+        script: |
+
+          $pat = $env:PAT
+          $organization = $env:Organisation
+          $repositoryId = $env:repositoryId
+          $project = $env:project
+          $token = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$pat"))
+          $headers = @{ Authorization = "Basic $token"  }
+          $url = "https://dev.azure.com/$organization/$project/_apis/git/repositories/$repositoryId/refs?filter=heads/&api-version=7.1-preview.1"
+          $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
+
+          # Filter for release/GBIW_x.y pattern
+          $pattern = '^refs/heads/release/GBIW_(\d+)\.(\d+)$'
+          $matchedBranches = @()
+
+          foreach ($branch in $response.value) {
+              if ($branch.name -match $pattern) {
+                  $major = [int]$matches[1]
+                  $minor = [int]$matches[2]
+
+                  $matchedBranches += [PSCustomObject]@{
+                      BranchName = $branch.name
+                      Major = $major
+                      Minor = $minor
+                  }
               }
-              Write-Host "No artifact version provided using latest version to deploy"
-              $uri = "https://feeds.dev.azure.com/$organization/$project/_apis/packaging/feeds/$feedId/UPack/packages/$packageId/versions?api-version=6.0-preview.1"
-              $response_artifact = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-              
-              if (-not $response_artifact.value) {
-                Write-Error "No package versions found."
-                exit 1
-              }
-              
-              $versions_artifact = $response_artifact.value.version
-              $sortedVersions_branch = $versions_artifact | Sort-Object {[version]$_} -Descending
-              $latest_artifact = $sortedVersions_branch[0]
-              
-              Write-Host "Latest version: $latest_artifact"
-              Write-Host "##vso[task.setvariable variable=artifactToUse;isOutput=true]$latest_artifact
-          env:
-            PAT: $(PAT)
-            Organisation: $(Organisation)
+          }
 
-            
+          # Sort by major and minor version descending
+          $latestBranch = $matchedBranches | Sort-Object -Property @{Expression="Major";Descending=$true}, @{Expression="Minor";Descending=$true} | Select-Object -First 1
 
-    # Downloads the Universal Packages.
-        - task: UniversalPackages@0
-          displayName: 'Download Universal Packages for UI'
-          inputs:
-            command: 'download'
-            downloadDirectory: '$(System.ArtifactsDirectory)/ui'
-            feedsToUse: 'internal'
-            vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-            vstsFeedPackage: 'test_workbench'
-            vstsPackageVersion: '$(SetArtifactVersion.artifactToUse)'  
+          # Output result
+          if ($latestBranch) {
+              Write-Output "Latest release branch matching pattern: $($latestBranch.BranchName)"
+              Write-Output "Version: $($latestBranch.Major).$($latestBranch.Minor)"
+          } else {
+              Write-Output "No branches matched the pattern 'release/GBIW_x.y'"
+          }
 
-        - task: UniversalPackages@0
-          displayName: 'Download Universal Packages for API'
-          inputs:
-            command: 'download'
-            downloadDirectory: '$(System.ArtifactsDirectory)/api'
-            feedsToUse: 'internal'
-            vstsFeed: '13ba055b-6690-4292-94e5-49a3a9e90192/8e28b9b6-8c72-40f0-9091-f595eab8f299'
-            vstsFeedPackage: 'test_workbench'
-            vstsPackageVersion: '$(SetArtifactVersion.artifactToUse)'    
+          Write-Host "##vso[task.setvariable variable=HighestReleaseBranch;isOutput=true]$($latestBranch.BranchName)"
+          Write-Host "Detected branch: $branch"
+          $url = 'https://feeds.dev.azure.com/StarkNet01/Project%20ForgePoint/_apis/packaging/Feeds/Kent/Packages/476a8c24-5db1-445a-bcaf-9120a9639a03/versions?api-version=6.0-preview.1'
+          $PackageInfo = (Invoke-RestMethod -Uri $url -Method Get -UseDefaultCredential -Headers $headers) 
+          $LatestVersion= $PackageInfo.value.version | Select-Object -first 1
+          Write-Host "Latest package Version = $LatestVersion"
+          Write-Host "##vso[task.setvariable variable=LatestVersion;isOutput=true]$LatestVersion"
+          
+      env:
+        PAT: $(PAT)
+        Organisation: $(Organisation)
+        repositoryId: $(repositoryId)
+        project: $(Project)
 
-        - task: PowerShell@2
-          displayName: 'Consumed Artifact '
-          inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "Downloaded artifact from build triggered by the current merge."
-                Write-Host "Contents of $(System.ArtifactsDirectory):"
-                Get-ChildItem -Recurse -Force "$(System.ArtifactsDirectory)"
-        - task: PowerShell@2
-          displayName: 'Unzip Universal Package contents'
-          inputs:
-            targetType: 'inline'
-            script: |
-              $zipPath = "$(System.ArtifactsDirectory)/ui/ui.zip"
-                    $unzipDestination = "$(Build.SourcesDirectory)/unzipped"
-              
-                    if (Test-Path $zipPath) {
-                      Write-Host "Unzipping $zipPath to $unzipDestination"
-                      Expand-Archive -Path $zipPath -DestinationPath $unzipDestination -Force
-                    } else {
-                      Write-Error "Zip file not found at $zipPath"
-                      exit 1
-                    }
+  - job: DeployAPI
+    displayName: 'Deploy API'
+    dependsOn: DetectBranch
+    variables:
+      HighestReleaseBranch: $[ dependencies.DetectBranch.outputs['detect.HighestReleaseBranch'] ]
+      Latestartifactversion: $[ dependencies.DetectBranch.outputs['detect.LatestVersion'] ]
+    pool:
+      vmImage: 'windows-latest'
 
-        - task: PowerShell@2
-          displayName: 'Replace appsettings.json with selected environment file'
-          inputs:
-            targetType: 'inline'
-            script: |
-              $config = '${{parameters.Customer}}'
-              Write-Host " customerName : $config "
-              $envFile = "appsettings.$config.json"
-              #Update the project file path
-              $projectDir = "$(Build.SourcesDirectory)/API/ASP.net_core_API" 
-              $sourcePath = "$projectDir/$envFile"
-              $destPath = "$projectDir/appsettings.json"
+    steps:
+    - task: PowerShell@2
+      displayName: print the vars
+      inputs:
+        targetType: inline
+        script: |
+          Write-Host "highestBranch: $(HighestReleaseBranch)"
+          Write-Host "Latestartifactversion: $(Latestartifactversion)"
 
-              if (Test-Path $sourcePath) {
-                Copy-Item -Path $sourcePath -Destination $destPath -Force
-                Write-Host " Replaced appsettings.json with $envFile"
-              } else {
-                Write-Error " File $envFile not found!"
-                exit 1
-              }
-        - task: PowerShell@2
-          displayName: 'Cleanup unused config files'
-          inputs:
-            targetType: 'inline'
-            script: |
-              $projectDir = "$(Build.SourcesDirectory)/$(projectFolder)"
-              $keepAppsettings = @("appsettings.json", "appsettings.$(buildConfiguration).json")
-              Get-ChildItem -Path $projectDir -Filter "appsettings.*.json" | Where-Object { $_.Name -notin $keepAppsettings } | Remove-Item -Force
-              # Get-ChildItem -Path $projectDir -Filter "web.*.config" | Where-Object { $_.Name -notin $keepWeb } | Remove-Item -Force
-              Write-Host "Cleaned up unused config files."
+    - task: UniversalPackages@0
+      displayName: 'Download Universal Package'
+      inputs:
+        command: 'download'
+        downloadDirectory: '$(System.ArtifactsDirectory)/api'
+        feedsToUse: 'internal'
+        vstsFeed: 'c70a2f22-0e6a-457d-a56f-4f6733761244/464ac2eb-4d82-46d9-8069-c43b9594ead2'
+        vstsFeedPackage: '476a8c24-5db1-445a-bcaf-9120a9639a03'
+        vstsPackageVersion: '$(Latestartifactversion)'
 
-        - task: PowerShell@2
-          name: SetWebApps
-          displayName: 'Set Web App Names based on Customer'
-          inputs:
-            targetType: 'inline'
-            script: |
-              $customer = "${{ parameters.UIWebApps }}"
-              $webApps = @{
-                "kent" = @{ UI = "kent-ui-webapp"; API = "kent-api-webapp" }
-                "CAM"  = @{ UI = "cam-ui"; API = "cam-api" }
-                "GM"   = @{ UI = "gm-ui"; API = "gm-api" }
-                "TVS"  = @{ UI = "tvs-ui"; API = "tvs-api" }
-                "Test" = @{ UI = "testgnpophweb"; API = "testgnpophwebapi" }
-                # Add all customer mappings here...
-              }
-        
-              if ($webApps.ContainsKey($customer)) {
-                $ui = $webApps[$customer].UI
-                $api = $webApps[$customer].API
-                Write-Host "UI Web App: $ui"
-                Write-Host "API Web App: $api"
-                Write-Host "##vso[task.setvariable variable=uiWebApp;isOutput=true]$ui"
-                Write-Host "##vso[task.setvariable variable=apiWebApp;isOutput=true]$api"
-              } else {
-                Write-Error "No web app mapping found for customer: $customer"
-                exit 1
-              }
-        - task: AzureWebApp@1
-          displayName: 'Deploy to UI Web App'
-          inputs:
-            azureSubscription: '${{parameters.ServiceConnections}}'
-            appType: 'webApp'
-            appName: 'SetWebApps.uiWebApp'
-            package: '$(Build.SourcesDirectory)/unzipped'
-            deploymentMethod: 'auto'
-      
-        - task: AzureWebApp@1
-          displayName: 'Deploy to API Web App'
-          inputs:
-            azureSubscription: '${{parameters.ServiceConnections}}'
-            appType: 'webApp'
-            appName: 'SetWebApps.apiWebApp'
-            package: '$(Build.SourcesDirectory)/unzipped'
-            deploymentMethod: 'auto'
-            
-  #       - task: AzureRmWebAppDeployment@5
-  #         inputs:
-  #           ConnectionType: 'AzureRM'
-  # # Uses a service connection for Azure authentication.
-  #           azureSubscription: '${{parameters.ServiceConnections}}'
-  #           appType: 'webApp'
-  #           WebAppName: '$(UIWebapp)'
-  # # Path to the ZIP package for deployment.
-  #           packageForLinux: '$(System.ArtifactsDirectory)/UI/**/*.zip'
-      
+    - task: PowerShell@2
+      displayName: 'List contents of downloaded API artifact folder'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $path = "$(System.ArtifactsDirectory)/api"
+          $path2 ="$(Build.SourcesDirectory)"
+          Write-Host "Listing contents of: $path"
+          Write-Host "Listing  the branch content: $path2"
+          if (Test-Path $path) {
+            Get-ChildItem -Path $path -Recurse | ForEach-Object {
+              Write-Host "$($_.FullName)"
+            }
+          } else {
+            Write-Error "Path does not exist: $path"
+          }
+          if (Test-Path $path2) {
+            Get-ChildItem -Path $path2 -Recurse | ForEach-Object {
+              Write-Host "$($_.FullName)"
+            }
+          } else {
+            Write-Error "Path2 does not exist: $path2"
+          }
+
+    # - task: PowerShell@2
+    #   displayName: 'Unzip Downloaded Artifact'
+    #   inputs:
+    #     targetType: 'inline'
+    #     script: |
+    #       $zipPath = "$(System.ArtifactsDirectory)/api/api.zip"
+    #       $dest = "$(Build.SourcesDirectory)/unzipped"
+    #       Expand-Archive -Path $zipPath -DestinationPath $dest -Force
+
+    - task: PowerShell@2
+      displayName: 'Replace appsettings.json from Branch'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $customer = '${{ parameters.Customer }}'
+          $safeCustomer = $customer -replace '[^a-zA-Z0-9]', ''
+          $sourceFile = "$(Build.SourcesDirectory)/API/ASP.net_core_API/appsettings.$safeCustomer.json"
+          $targetFile = "$(System.ArtifactsDirectory)/api/appsettings.json"
+
+          if (Test-Path $sourceFile) {
+            Copy-Item -Path $sourceFile -Destination $targetFile -Force
+            Write-Host "Replaced appsettings.json with $sourceFile"
+          } else {
+            Write-Error "Customer-specific file not found: $sourceFile"
+            exit 1
+          }
+
+    - task: PowerShell@2
+      displayName: 'Clean Up Other Config Files'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $artifactDir = "$(System.ArtifactsDirectory)/api"
+          $zipPath = "$(Build.ArtifactStagingDirectory)/api_rezipped.zip"
+
+          Write-Host "Cleaning up config files in: $artifactDir"
+
+          # Delete all appsettings.*.json except appsettings.json
+          Get-ChildItem -Path $artifactDir -Filter "appsettings.*.json" | Where-Object { $_.Name -ne "appsettings.json" } | Remove-Item -Force
+
+          Write-Host "Removed unnecessary appsettings.*.json files."
+
+          # Delete existing zip if present
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+            Write-Host "Removed old zip file: $zipPath"
+          }
+
+          # Create new zip of cleaned artifact directory
+          Add-Type -AssemblyName 'System.IO.Compression.FileSystem'
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($artifactDir, $zipPath)
+
+          Write-Host "Zipped cleaned API folder to: $zipPath"
+
+    - task: PowerShell@2
+      name: SetWebApps
+      displayName: 'Set Web App Names based on Customer'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $customer = '${{ parameters.Customer }}'
+          $webApps = @{
+            "Kent"         = @{ UI = "kent-ui-webapp"; API = "Apitestres" }
+            "CustomerZero" = @{ UI = "cz-ui"; API = "cz-api" }
+            "CAM"          = @{ UI = "cam-ui"; API = "cam-api" }
+            "GM"           = @{ UI = "gm-ui"; API = "gm-api" }
+            "TVS"          = @{ UI = "tvs-ui"; API = "tvs-api" }
+            "Banes"        = @{ UI = "banes-ui"; API = "banes-api" }
+            "NARP(NCR)"    = @{ UI = "narp-ui"; API = "narp-api" }
+            "Staffs(OHC)"  = @{ UI = "staffs-ui"; API = "staffs-api" }
+            "Test"         = @{ UI = "test-ui"; API = "test-api" }
+          }
+
+          if ($webApps.ContainsKey($customer)) {
+            $ui = $webApps[$customer].UI
+            $api = $webApps[$customer].API
+            Write-Host "##vso[task.setvariable variable=uiWebApp;isOutput=true]$ui"
+            Write-Host "##vso[task.setvariable variable=apiWebApp;isOutput=true]$api"
+            Write-Host "UiApp: $ui"
+            Write-Host "API app: $api"
+          } else {
+            Write-Error "No web app mapping found for customer: $customer"
+            exit 1
+          }
+
+    - task: AzureWebApp@1
+      displayName: 'Deploy API to WebApp'
+      inputs:
+        azureSubscription: 'Dotnet'
+        appType: 'webApp'
+        appName: '$(SetWebApps.apiWebApp)'
+        package: '$(Build.ArtifactStagingDirectory)/api_rezipped.zip'
